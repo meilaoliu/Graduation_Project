@@ -1,0 +1,30 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/leo/ego-planner-for-ground-robot/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/bspline_opt/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/plan_manage/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/mpc_controller/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/patchwork/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/path_searching/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/plan_env/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/ego-planner/planner/traj_utils/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/autonomous_exploration_development_environment/src/velodyne_simulator/velodyne_gazebo_plugins/include/**",
+        "/home/leo/ego-planner-for-ground-robot/src/autonomous_exploration_development_environment/src/waypoint_rviz_plugin/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}
