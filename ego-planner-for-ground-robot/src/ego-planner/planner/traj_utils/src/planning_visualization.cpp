@@ -131,9 +131,13 @@ namespace ego_planner
   void PlanningVisualization::displayGoalPoint(Eigen::Vector3d goal_point, Eigen::Vector4d color, const double scale, int id)
   {
     visualization_msgs::Marker sphere;
-    sphere.header.frame_id = "world";
+    sphere.header.frame_id = "map";
     sphere.header.stamp = ros::Time::now();
+    sphere.ns = "goal_point";
     sphere.type = visualization_msgs::Marker::SPHERE;
+    sphere.action = visualization_msgs::Marker::DELETEALL;
+    goal_point_pub.publish(sphere);
+
     sphere.action = visualization_msgs::Marker::ADD;
     sphere.id = id;
 
@@ -152,16 +156,26 @@ namespace ego_planner
     goal_point_pub.publish(sphere);
   }
 
-  void PlanningVisualization::displayGlobalPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id)
+  void PlanningVisualization::displayGlobalPathList(vector<Eigen::Vector3d> global_path, const double scale, int id)
   {
-
-    if (global_list_pub.getNumSubscribers() == 0)
-    {
+    if (global_path.size() == 0)
       return;
-    }
+
+    visualization_msgs::Marker line_strip;
+    line_strip.header.frame_id = "map";
+    line_strip.header.stamp = ros::Time::now();
+    line_strip.ns = "global_list";
+    line_strip.type = visualization_msgs::Marker::LINE_STRIP;
+    line_strip.action = visualization_msgs::Marker::DELETEALL;
+    global_list_pub.publish(line_strip);
+
+    line_strip.action = visualization_msgs::Marker::ADD;
+    line_strip.id = id;
+    line_strip.pose.orientation.w = 1.0;
+    line_strip.scale.x = scale;
 
     Eigen::Vector4d color(0, 0.5, 0.5, 1);
-    displayMarkerList(global_list_pub, init_pts, scale, color, id);
+    displayMarkerList(global_list_pub, global_path, scale, color, id);
   }
 
   void PlanningVisualization::displayInitPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id)
