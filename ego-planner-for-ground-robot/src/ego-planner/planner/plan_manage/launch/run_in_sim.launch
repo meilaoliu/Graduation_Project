@@ -43,7 +43,7 @@
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->
-    <arg name="flight_type" value="2" />
+    <arg name="flight_type" value="1" />
     
     <!-- global waypoints -->
     <!-- It generates a piecewise min-snap traj passing all waypoints -->
@@ -73,8 +73,8 @@
     <arg name="point5_y" value="-8.0" />
     <arg name="point5_z" value="0.0" />
 
-    <arg name="point6_x" value="-15.0" />
-    <arg name="point6_y" value="6.0" />
+    <arg name="point6_x" value="-20.0" />
+    <arg name="point6_y" value="0.0" />
     <arg name="point6_z" value="0.0" />
 
 

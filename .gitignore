@@ -14,3 +14,5 @@ robot_tools-main/
 *.dae
 rviz.png
 gazebo.png
+vlm_arm/
+substation_dae/materials/textures/
