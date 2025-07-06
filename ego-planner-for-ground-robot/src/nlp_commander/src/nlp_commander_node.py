@@ -140,8 +140,8 @@ class NlpCommander:
         if not hasattr(self, '_debug_counter'):
             self._debug_counter = 0
         self._debug_counter += 1
-        if self._debug_counter % 50 == 0:
-            rospy.loginfo(f"当前位置: ({current_pos.x:.2f}, {current_pos.y:.2f}), 目标: ({goal_pos.x:.2f}, {goal_pos.y:.2f}), 距离: {distance:.2f}m")
+        #if self._debug_counter % 50 == 0:
+            #rospy.loginfo(f"当前位置: ({current_pos.x:.2f}, {current_pos.y:.2f}), 目标: ({goal_pos.x:.2f}, {goal_pos.y:.2f}), 距离: {distance:.2f}m")
         
         if distance < self.goal_tolerance:
             rospy.loginfo(f"已到达目标: {self.waypoint_queue[0][0]}")

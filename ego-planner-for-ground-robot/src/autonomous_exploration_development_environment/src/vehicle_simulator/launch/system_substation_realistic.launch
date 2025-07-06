@@ -5,7 +5,7 @@
   <arg name="cameraOffsetZ" default="0"/>
   <arg name="vehicleX" default="9.10"/>
   <arg name="vehicleY" default="27.47"/>
-  <arg name="terrainZ" default="0"/>
+  <arg name="terrainZ" default="0.2"/>
   <arg name="vehicleYaw" default="3.14"/>
   <arg name="gazebo_gui" default="true"/>
   <arg name="checkTerrainConn" default="false"/>

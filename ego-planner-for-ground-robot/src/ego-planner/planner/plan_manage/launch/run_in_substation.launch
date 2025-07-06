@@ -1,0 +1,157 @@
+<launch>
+  <!-- size of map, change the size inflate x, y, z according to your application -->
+  <arg name="map_size_x" value="300"/>
+  <arg name="map_size_y" value="300"/>
+  <arg name="map_size_z" value=" 4.0"/>
+
+  <!-- topic of your odometry such as VIO or LIO -->
+  <arg name="odom_topic" value="/state_estimation" />
+  <arg name="pointcloud_topic" value="/registered_scan" />
+
+  <!-- main algorithm params -->
+  <include file="$(find ego_planner)/launch/advanced_substation_param.xml">
+
+    <arg name="map_size_x_" value="$(arg map_size_x)"/>
+    <arg name="map_size_y_" value="$(arg map_size_y)"/>
+    <arg name="map_size_z_" value="$(arg map_size_z)"/>
+    <arg name="odometry_topic" value="$(arg odom_topic)"/>
+
+    <!-- camera pose: transform of camera frame in the world frame -->
+    <!-- depth topic: depth image, 640x480 by default -->
+    <!-- don't set cloud_topic if you already set these ones! -->
+    <arg name="camera_pose_topic" value="/pcl_render_node/camera_pose"/>
+    <arg name="depth_topic" value="/pcl_render_node/depth"/>
+
+    <!-- topic of point cloud measurement, such as from LIDAR  -->
+    <!-- don't set camera pose and depth, if you already set this one! -->
+    <arg name="cloud_topic" value="$(arg pointcloud_topic)"/>
+    <arg name="goal_topic" value="/move_base_simple/goal"/>
+
+    <!-- intrinsic params of the depth camera -->
+
+    <arg name="cx" value="321.04638671875"/>
+    <arg name="cy" value="243.44969177246094"/>
+    <arg name="fx" value="387.229248046875"/>
+    <arg name="fy" value="387.229248046875"/>
+
+    <!-- maximum velocity and acceleration the drone will reach -->
+    <arg name="max_vel" value="1.5" />
+    <arg name="max_acc" value="3" />
+
+    <!--always set to 1.5 times grater than sensing horizen-->
+    <arg name="planning_horizon" value="10.5" />
+
+    <!-- 1: use 2D Nav Goal to select goal  -->
+    <!-- 2: use global waypoints below  -->
+    <arg name="flight_type" value="2" />
+    
+    <!-- global waypoints -->
+    <!-- It generates a piecewise min-snap traj passing all waypoints -->
+    <arg name="point_num" value="16" />
+
+    <!-- 1. 入口点：(9, 27) -->
+    <arg name="point0_x" value="9.0" />
+    <arg name="point0_y" value="27.0" />
+    <arg name="point0_z" value="0.0" />
+
+    <!-- 2. 插值点1：(3, 28) -->
+    <arg name="point1_x" value="3.0" />
+    <arg name="point1_y" value="28.0" />
+    <arg name="point1_z" value="0.0" />
+
+    <!-- 3. 低压配电室1：(-8, 28) -->
+    <arg name="point2_x" value="-8.0" />
+    <arg name="point2_y" value="28.0" />
+    <arg name="point2_z" value="0.0" />
+
+    <!-- 4. 低压配电室2：(-26, 28) -->
+    <arg name="point3_x" value="-26.0" />
+    <arg name="point3_y" value="28.0" />
+    <arg name="point3_z" value="0.0" />
+
+    <!-- 5. 低压配电室3：(-43, 29) -->
+    <arg name="point4_x" value="-43.0" />
+    <arg name="point4_y" value="29.0" />
+    <arg name="point4_z" value="0.0" />
+
+    <!-- 6. 高压配电区巡检点1：(-30, 13) -->
+    <arg name="point5_x" value="-30.0" />
+    <arg name="point5_y" value="13.0" />
+    <arg name="point5_z" value="0.0" />
+
+    <!-- 7. 高压配电区巡检点2：(-30, -1) -->
+    <arg name="point6_x" value="-30.0" />
+    <arg name="point6_y" value="-1.0" />
+    <arg name="point6_z" value="0.0" />
+
+    <!-- 8. 高压配电区巡检点3：(-30, -17) -->
+    <arg name="point7_x" value="-30.0" />
+    <arg name="point7_y" value="-17.0" />
+    <arg name="point7_z" value="0.0" />
+
+    <!-- 9. 3SVG/无功补偿区3：(-43, -27) -->
+    <arg name="point8_x" value="-43.0" />
+    <arg name="point8_y" value="-27.0" />
+    <arg name="point8_z" value="0.0" />
+
+    <!-- 10. 2SVG/无功补偿区2：(-23, -27) -->
+    <arg name="point9_x" value="-23.0" />
+    <arg name="point9_y" value="-27.0" />
+    <arg name="point9_z" value="0.0" />
+
+    <!-- 11. 1SVG/无功补偿区1：(-8, -27) -->
+    <arg name="point10_x" value="-8.0" />
+    <arg name="point10_y" value="-27.0" />
+    <arg name="point10_z" value="0.0" />
+
+    <!-- 12. 35kv配电箱1：(-2, -14) -->
+    <arg name="point11_x" value="-2.0" />
+    <arg name="point11_y" value="-14.0" />
+    <arg name="point11_z" value="0.0" />
+
+    <!-- 13. 35kv配电箱2：(-2, 1) -->
+    <arg name="point12_x" value="-2.0" />
+    <arg name="point12_y" value="1.0" />
+    <arg name="point12_z" value="0.0" />
+
+    <!-- 14. 35kv配电箱3：(-2, 17) -->
+    <arg name="point13_x" value="-2.0" />
+    <arg name="point13_y" value="17.0" />
+    <arg name="point13_z" value="0.0" />
+
+    <!-- 15. 插值点2：(-3, 26) -->
+    <arg name="point14_x" value="-3.0" />
+    <arg name="point14_y" value="26.0" />
+    <arg name="point14_z" value="0.0" />
+
+    <!-- 16. 入口点（闭环）：(9, 27) -->
+    <arg name="point15_x" value="9.0" />
+    <arg name="point15_y" value="27.0" />
+    <arg name="point15_z" value="0.0" />
+
+
+    
+  </include>
+
+  <!-- trajectory server -->
+
+  <node pkg="ego_planner" name="traj_server" type="traj_server" output="screen">
+    <remap from="/position_cmd" to="planning/pos_cmd"/>
+
+    <remap from="/odom_world" to="$(arg odom_topic)"/>
+    <param name="traj_server/time_forward" value="1.0" type="double"/>
+  </node>
+
+  <rosparam command="load" file="$(find patchwork)/config/params_ouster128.yaml" />
+
+  <node name="$(anon offline_own_data)" pkg="patchwork" type="offline_own_data" output="screen">
+  <rosparam param="/algorithm">"patchwork"</rosparam> 
+  <remap from="/pointcloud_scan" to="$(arg pointcloud_topic)"/>
+  </node>
+
+  <include file="$(find ego_planner)/launch/rviz.launch"/>
+
+
+
+
+</launch>
