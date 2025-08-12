@@ -43,7 +43,7 @@
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->
-    <arg name="flight_type" value="2" />
+    <arg name="flight_type" value="1" />
     
     <!-- global waypoints -->
     <!-- It generates a piecewise min-snap traj passing all waypoints -->
@@ -120,8 +120,8 @@
     <arg name="point13_z" value="0.0" />
 
     <!-- 15. 插值点2：(-3, 26) -->
-    <arg name="point14_x" value="-3.0" />
-    <arg name="point14_y" value="26.0" />
+    <arg name="point14_x" value="3.0" />
+    <arg name="point14_y" value="28.0" />
     <arg name="point14_z" value="0.0" />
 
     <!-- 16. 入口点（闭环）：(9, 27) -->
