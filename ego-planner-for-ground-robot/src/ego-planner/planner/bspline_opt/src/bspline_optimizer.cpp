@@ -15,7 +15,9 @@ namespace ego_planner
         nh.param("optimization/dist0", dist0_, -1.0);
         nh.param("optimization/max_vel", max_vel_, -1.0);
         nh.param("optimization/max_acc", max_acc_, -1.0);
-
+        nh.param("optimization/max_w", max_w_, -1.0);
+        nh.param("optimization/max_k", max_k_, -1.0);
+        
         nh.param("optimization/order", order_, 3);
     }
 
@@ -659,6 +661,90 @@ namespace ego_planner
                 }
             }
             //cout << endl;
+        }
+
+
+        Eigen::Matrix2d B ;
+        B << 0 , -1,
+            1 , 0;
+        /* angularVelocity feasibility */
+        for(int i = 0 ; i < q.cols() - 2 ; i++){
+            // .head<2>() 从三维向量中取出前两个元素 (x, y) 形成一个二维向量
+            Eigen::Vector2d vi = (q.col(i + 1).head<2>() - q.col(i).head<2>()) / ts;
+            Eigen::Vector2d ai = (q.col(i + 2).head<2>() - 2 * q.col(i + 1).head<2>() + q.col(i).head<2>()) * ts_inv2;
+
+            double vi_x = vi(0) , vi_y = vi(1);
+            double ai_x = ai(0) , ai_y = ai(1);
+            double s2 = vi.squaredNorm();
+            if (s2 < 1e-6) continue; // 防除零
+
+            double wi = (vi_x*ai_y - vi_y*ai_x) / vi.squaredNorm() ;
+            if(wi > max_w_){
+                cost += pow(wi - max_w_, 2);
+                double gw = 2*(wi - max_w_);
+                Eigen::Vector2d gwv = gw * ((-B*ai - 2*wi*vi) / s2);
+                Eigen::Vector2d gwa = gw * (B * vi / s2);
+                gradient.col(i + 0).head<2>() +=  -gwv/ts + gwa*ts_inv2;
+                gradient.col(i + 1).head<2>() +=  gwv/ts - 2.0 * gwa*ts_inv2;
+                gradient.col(i + 2).head<2>()+= gwa*ts_inv2;
+
+                ROS_WARN("Angular velocity violation at segment %d: wi=%.3f > max_w=%.3f. ", i, wi, max_w_);
+                std::cout << "  Gradient g_omega_v: [" << gwv.x() << ", " << gwv.y() << "]" << std::endl;
+                std::cout << "  Gradient g_omega_a: [" << gwa.x() << ", " << gwa.y() << "]" << std::endl;
+            }
+            else if(wi < -max_w_){
+                cost += pow(wi + max_w_, 2);
+                double gw = 2*(wi + max_w_);
+                Eigen::Vector2d gwv = gw * ((-B*ai - 2*wi*vi) / s2);
+                Eigen::Vector2d gwa = gw * (B * vi / s2);
+                gradient.col(i + 0).head<2>()  +=  -gwv/ts + gwa*ts_inv2;
+                gradient.col(i + 1).head<2>()  +=  gwv/ts - 2.0 * gwa*ts_inv2;
+                gradient.col(i + 2).head<2>() += gwa*ts_inv2;
+
+                ROS_WARN("Angular velocity violation at segment %d: wi=%.3f > max_w=%.3f. ", i, wi, max_w_);
+                std::cout << "  Gradient g_omega_v: [" << gwv.x() << ", " << gwv.y() << "]" << std::endl;
+                std::cout << "  Gradient g_omega_a: [" << gwa.x() << ", " << gwa.y() << "]" << std::endl;
+            }
+        }
+
+        /* curvature feasibility */
+        for(int i = 0 ; i < q.cols() - 2 ; i++){
+            Eigen::Vector2d vi = (q.col(i + 1).head<2>() - q.col(i).head<2>()) / ts;
+            Eigen::Vector2d ai = (q.col(i + 2).head<2>() - 2 * q.col(i + 1).head<2>() + q.col(i).head<2>()) * ts_inv2;
+
+            double vi_x = vi(0) , vi_y = vi(1);
+            double ai_x = ai(0) , ai_y = ai(1);
+            double s2 = vi.squaredNorm();
+            if (s2 < 1e-6) continue; // 防除零
+            double ki = (vi_x*ai_y - vi_y*ai_x) / (s2 * vi.norm()) ;
+
+            if(ki > max_k_){
+                cost += pow(ki - max_k_ , 2);
+                double gk = 2*(ki - max_k_);
+                Eigen::Vector2d gkv = gk * ((-B*ai / (s2 * vi.norm())) - 3*ki*vi / s2);
+                Eigen::Vector2d gka = gk * ( B * vi / ( s2 * vi.norm()) );
+                gradient.col(i + 0).head<2>() +=  -gkv/ts + gka*ts_inv2;
+                gradient.col(i + 1).head<2>() +=  gkv/ts - 2.0 * gka*ts_inv2;
+                gradient.col(i + 2).head<2>() += gka*ts_inv2;
+
+                ROS_WARN("Curvature violation at segment %d: ki=%.3f > max_k=%.3f. ", i, ki, max_k_);
+                std::cout << "  Gradient fuck g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
+                std::cout << "  Gradient g_kappa_a: [" << gka.x() << ", " << gka.y() << "]" << std::endl;
+            }
+            else if(ki < -max_k_){
+                cost += pow(ki + max_k_ , 2);
+                double gk = 2*(ki + max_k_);
+                Eigen::Vector2d gkv = gk * ((-B*ai / (s2 * vi.norm())) - 3*ki*vi / s2);
+                Eigen::Vector2d gka = gk * ( B * vi / ( s2 * vi.norm()) );
+                gradient.col(i + 0).head<2>() +=  -gkv/ts + gka*ts_inv2;
+                gradient.col(i + 1).head<2>() +=  gkv/ts - 2.0 * gka*ts_inv2;
+                gradient.col(i + 2).head<2>() += gka*ts_inv2;
+
+                ROS_WARN("Curvature violation at segment %d: ki=%.3f > max_k=%.3f. ", i, ki, max_k_);
+                std::cout << "  Gradient g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
+                std::cout << "  Gradient g_kappa_a: [" << gka.x() << ", " << gka.y() << "]" << std::endl;
+            }
+
         }
 
 #endif

@@ -118,6 +118,7 @@ namespace ego_planner
         //
         double dist0_;             // safe distance
         double max_vel_, max_acc_; // dynamic limits
+        double max_k_, max_w_; // curvature and angular velocity limits
 
         int variable_num_;              // optimization variables
         int iter_num_;                  // iteration of the solver

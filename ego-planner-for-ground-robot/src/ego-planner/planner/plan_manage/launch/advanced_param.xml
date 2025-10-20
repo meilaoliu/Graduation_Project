@@ -16,6 +16,9 @@
 
   <arg name="max_vel"/>
   <arg name="max_acc"/>
+  <arg name="max_w"/>
+  <arg name="max_k"/>
+  
   <arg name="planning_horizon"/>
 
   <arg name="point_num"/>
@@ -141,7 +144,9 @@
     <param name="optimization/dist0" value="1.0" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
-
+    <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
+    <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
+    
     <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
     <param name="bspline/limit_ratio" value="1.1" type="double"/>
