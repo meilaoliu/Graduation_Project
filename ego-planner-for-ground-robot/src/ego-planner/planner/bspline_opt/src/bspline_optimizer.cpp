@@ -1,5 +1,10 @@
 #include "bspline_opt/bspline_optimizer.h"
 #include "bspline_opt/gradient_descent_optimizer.h"
+
+// ADD new macro definitions to enable/disable constraints
+#define USE_ANGULAR_VELOCITY_CONSTRAINT
+#define USE_CURVATURE_CONSTRAINT
+
 // using namespace std;
 
 namespace ego_planner
@@ -664,9 +669,13 @@ namespace ego_planner
         }
 
 
+#if defined(USE_ANGULAR_VELOCITY_CONSTRAINT) || defined(USE_CURVATURE_CONSTRAINT)
         Eigen::Matrix2d B ;
         B << 0 , -1,
             1 , 0;
+#endif
+
+#ifdef USE_ANGULAR_VELOCITY_CONSTRAINT
         /* angularVelocity feasibility */
         for(int i = 0 ; i < q.cols() - 2 ; i++){
             // .head<2>() 从三维向量中取出前两个元素 (x, y) 形成一个二维向量
@@ -706,7 +715,9 @@ namespace ego_planner
                 std::cout << "  Gradient g_omega_a: [" << gwa.x() << ", " << gwa.y() << "]" << std::endl;
             }
         }
+#endif
 
+#ifdef USE_CURVATURE_CONSTRAINT
         /* curvature feasibility */
         for(int i = 0 ; i < q.cols() - 2 ; i++){
             Eigen::Vector2d vi = (q.col(i + 1).head<2>() - q.col(i).head<2>()) / ts;
@@ -728,7 +739,7 @@ namespace ego_planner
                 gradient.col(i + 2).head<2>() += gka*ts_inv2;
 
                 ROS_WARN("Curvature violation at segment %d: ki=%.3f > max_k=%.3f. ", i, ki, max_k_);
-                std::cout << "  Gradient fuck g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
+                std::cout << "  Gradient g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
                 std::cout << "  Gradient g_kappa_a: [" << gka.x() << ", " << gka.y() << "]" << std::endl;
             }
             else if(ki < -max_k_){
@@ -746,6 +757,7 @@ namespace ego_planner
             }
 
         }
+#endif
 
 #endif
     }
