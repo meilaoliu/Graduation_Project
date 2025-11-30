@@ -21,6 +21,8 @@ namespace ego_planner
         nh.param("manager/feasibility_tolerance", pp_.feasibility_tolerance_, 0.0);
         nh.param("manager/control_points_distance", pp_.ctrl_pt_dist, -1.0);
         nh.param("manager/planning_horizon", pp_.planning_horizen_, 5.0);
+        nh.param("manager/use_minco", use_minco_, false);
+        nh.param("manager/use_multitopology_trajs", pp_.use_multitopology_trajs_, false);
 
         local_data_.traj_id_ = 0;
         grid_map_.reset(new GridMap);
@@ -31,6 +33,14 @@ namespace ego_planner
         bspline_optimizer_rebound_->setEnvironment(grid_map_);
         bspline_optimizer_rebound_->a_star_.reset(new AStar);
         bspline_optimizer_rebound_->a_star_->initGridMap(grid_map_, Eigen::Vector2i(300, 300));
+
+        if (use_minco_)
+        {
+            minco_optimizer_.reset(new PolyTrajOptimizer);
+            minco_optimizer_->setParam(nh);
+            minco_optimizer_->setEnvironment(grid_map_);
+            minco_optimizer_->setDroneId(-1); // Single robot
+        }
 
         visualization_ = vis;
     }
@@ -43,6 +53,11 @@ namespace ego_planner
                                           Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
                                           Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
     {
+        // 如果使用 MINCO，调用 MINCO 重规划
+        if (use_minco_)
+        {
+            return reboundReplanMinco(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, flag_polyInit, flag_randomPolyTraj);
+        }
 
         static int count = 0;
         std::cout << endl
@@ -452,6 +467,7 @@ namespace ego_planner
 
     void EGOPlannerManager::updateTrajInfo(const UniformBspline &position_traj, const ros::Time time_now)
     {
+        local_data_.use_minco_traj_ = false; // 标记使用 B 样条轨迹
         local_data_.start_time_ = time_now;
         local_data_.position_traj_ = position_traj;
         local_data_.velocity_traj_ = local_data_.position_traj_.getDerivative();
@@ -480,6 +496,378 @@ namespace ego_planner
             point_set.push_back(bspline.evaluateDeBoorT(time));
         }
         UniformBspline::parameterizeToBspline(dt, point_set, start_end_derivative, ctrl_pts);
+    }
+
+    bool EGOPlannerManager::reboundReplanMinco(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
+                                               Eigen::Vector3d local_target_pt, Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+    {
+        ros::Time t_start = ros::Time::now();
+        ros::Duration t_init, t_opt;
+
+        static int count = 0;
+        cout << "\033[47;30m\n[" << t_start << "] Replan Minco " << count++ << "\033[0m" << endl;
+
+        /*** STEP 1: INIT ***/
+        minco_optimizer_->setIfTouchGoal(global_data_.localTrajReachTarget()); // Approximate check
+        double ts = pp_.ctrl_pt_dist / pp_.max_vel_;
+
+        poly_traj::MinJerkOpt initMJO;
+        if (!computeInitState(start_pt, start_vel, start_acc, local_target_pt, local_target_vel,
+                              flag_polyInit, flag_randomPolyTraj, ts, initMJO))
+        {
+            continous_failures_count_++;
+            return false;
+        }
+
+        Eigen::MatrixXd cstr_pts = initMJO.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+        vector<std::pair<int, int>> segments;
+        if (minco_optimizer_->finelyCheckAndSetConstraintPoints(segments, initMJO, true) == PolyTrajOptimizer::CHK_RET::ERR)
+        {
+            continous_failures_count_++;
+            return false;
+        }
+
+        t_init = ros::Time::now() - t_start;
+
+        std::vector<Eigen::Vector3d> point_set;
+        for (int i = 0; i < cstr_pts.cols(); ++i)
+            point_set.push_back(cstr_pts.col(i));
+        visualization_->displayInitPathList(point_set, 0.2, 0);
+
+        t_start = ros::Time::now();
+
+        /*** STEP 2: OPTIMIZE ***/
+        bool flag_success = false;
+        poly_traj::MinJerkOpt best_MJO;
+
+        if (pp_.use_multitopology_trajs_)
+        {
+            // 多拓扑模式：生成多条候选轨迹
+            vector<vector<Eigen::Vector3d>> vis_trajs;
+            
+            poly_traj::Trajectory initTraj = initMJO.getTraj();
+            int PN = initTraj.getPieceNum();
+            Eigen::MatrixXd all_pos = initTraj.getPositions();
+            Eigen::MatrixXd innerPts = all_pos.block(0, 1, 3, PN - 1);
+            Eigen::Matrix<double, 3, 3> headState, tailState;
+            headState << initTraj.getJuncPos(0), initTraj.getJuncVel(0), initTraj.getJuncAcc(0);
+            tailState << initTraj.getJuncPos(PN), initTraj.getJuncVel(PN), initTraj.getJuncAcc(PN);
+            
+            std::vector<ConstraintPoints> trajs = minco_optimizer_->distinctiveTrajs(segments);
+            Eigen::VectorXi success = Eigen::VectorXi::Zero(trajs.size());
+            double final_cost, min_cost = 999999.0;
+            
+            for (int i = trajs.size() - 1; i >= 0; i--)
+            {
+                minco_optimizer_->setConstraintPoints(trajs[i]);
+                minco_optimizer_->setUseMultitopologyTrajs(true);
+                
+                if (minco_optimizer_->optimizeTrajectory(headState, tailState,
+                                                         innerPts, initTraj.getDurations(), final_cost))
+                {
+                    success[i] = true;
+                    
+                    if (final_cost < min_cost)
+                    {
+                        min_cost = final_cost;
+                        best_MJO = minco_optimizer_->getMinJerkOpt();
+                        flag_success = true;
+                    }
+                    
+                    // 可视化
+                    Eigen::MatrixXd ctrl_pts_temp = minco_optimizer_->getMinJerkOpt().getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+                    std::vector<Eigen::Vector3d> point_set_temp;
+                    for (int j = 0; j < ctrl_pts_temp.cols(); j++)
+                    {
+                        point_set_temp.push_back(ctrl_pts_temp.col(j));
+                    }
+                    vis_trajs.push_back(point_set_temp);
+                }
+            }
+            
+            if (trajs.size() > 1)
+            {
+                cout << "\033[1;33m"
+                     << "multi-trajs=" << trajs.size() << ",\033[1;0m"
+                     << " Success:fail=" << success.sum() << ":" << success.size() - success.sum() << endl;
+            }
+            
+            // 可视化多条轨迹（只在有成功轨迹时）
+            if (!vis_trajs.empty())
+            {
+                visualization_->displayMultiOptimalPathList(vis_trajs, 0.1);
+            }
+        }
+        else
+        {
+            // 单拓扑模式：只优化一条轨迹
+            poly_traj::Trajectory initTraj = initMJO.getTraj();
+            int PN = initTraj.getPieceNum();
+            Eigen::MatrixXd all_pos = initTraj.getPositions();
+            Eigen::MatrixXd innerPts = all_pos.block(0, 1, 3, PN - 1);
+            Eigen::Matrix<double, 3, 3> headState, tailState;
+            headState << initTraj.getJuncPos(0), initTraj.getJuncVel(0), initTraj.getJuncAcc(0);
+            tailState << initTraj.getJuncPos(PN), initTraj.getJuncVel(PN), initTraj.getJuncAcc(PN);
+            double final_cost;
+            flag_success = minco_optimizer_->optimizeTrajectory(headState, tailState,
+                                                                innerPts, initTraj.getDurations(), final_cost);
+            best_MJO = minco_optimizer_->getMinJerkOpt();
+        }
+
+        t_opt = ros::Time::now() - t_start;
+
+        /*** STEP 3: Store and display results ***/
+        cout << "Success=" << (flag_success ? "yes" : "no") << endl;
+        if (flag_success)
+        {
+            static double sum_time = 0;
+            static int count_success = 0;
+            sum_time += (t_init + t_opt).toSec();
+            count_success++;
+            printf("Time:\033[42m%.3fms,\033[0m init:%.3fms, optimize:%.3fms, avg=%.3fms\n",
+                   (t_init + t_opt).toSec() * 1000, t_init.toSec() * 1000, t_opt.toSec() * 1000, sum_time / count_success * 1000);
+
+            setLocalTrajFromOpt(best_MJO, global_data_.localTrajReachTarget());
+            cstr_pts = best_MJO.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+            
+            // 单拓扑模式下显示最优轨迹（多拓扑模式已经在上面显示过了）
+            if (!pp_.use_multitopology_trajs_)
+            {
+                if (cstr_pts.cols() == 0)
+                {
+                    ROS_WARN("cstr_pts is empty! cps_num_prePiece=%d", minco_optimizer_->get_cps_num_prePiece_());
+                }
+                visualization_->displayOptimalList(cstr_pts, 0);
+            }
+
+            continous_failures_count_ = 0;
+        }
+        else
+        {
+            cstr_pts = minco_optimizer_->getMinJerkOpt().getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+            visualization_->displayInitPathList(point_set, 0.2, 0);
+
+            continous_failures_count_++;
+        }
+
+        return flag_success;
+    }
+
+    bool EGOPlannerManager::computeInitState(
+        const Eigen::Vector3d &start_pt, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
+        const Eigen::Vector3d &local_target_pt, const Eigen::Vector3d &local_target_vel,
+        const bool flag_polyInit, const bool flag_randomPolyTraj, const double &ts,
+        poly_traj::MinJerkOpt &initMJO)
+    {
+
+        static bool flag_first_call = true;
+
+        if (flag_first_call || flag_polyInit) /*** case 1: polynomial initialization ***/
+        {
+            flag_first_call = false;
+
+            /* basic params */
+            Eigen::Matrix3d headState, tailState;
+            Eigen::MatrixXd innerPs;
+            Eigen::VectorXd piece_dur_vec;
+            int piece_nums;
+            constexpr double init_of_init_totaldur = 2.0;
+            
+            // 方案C: 优化起点速度方向，避免大角度差异导致掉头
+            // 如果速度很小，不要过度依赖当前速度方向
+            Eigen::Vector3d adjusted_start_vel = start_vel;
+            
+            if (start_vel.norm() < 0.1)
+            {
+                // 速度很小时，直接指向目标
+                double vel_norm = 0.1; 
+                double target_direction = atan2((local_target_pt - start_pt)(1), (local_target_pt - start_pt)(0));
+                adjusted_start_vel(0) = vel_norm * cos(target_direction);
+                adjusted_start_vel(1) = vel_norm * sin(target_direction);
+                adjusted_start_vel(2) = 0;
+            }
+            else
+            {
+                double current_yaw = atan2(start_vel(1), start_vel(0));
+                double target_direction = atan2((local_target_pt - start_pt)(1), (local_target_pt - start_pt)(0));
+                double yaw_diff = target_direction - current_yaw;
+                
+                // 归一化角度差到 [-PI, PI]
+                while (yaw_diff > M_PI) yaw_diff -= 2 * M_PI;
+                while (yaw_diff < -M_PI) yaw_diff += 2 * M_PI;
+                
+                // 如果方向差异太大（>60度），调整起点速度方向
+                if (abs(yaw_diff) > M_PI / 3.0)
+                {
+                    double vel_norm = std::max(start_vel.norm(), 0.1); 
+                    adjusted_start_vel(0) = vel_norm * cos(target_direction);
+                    adjusted_start_vel(1) = vel_norm * sin(target_direction);
+                    adjusted_start_vel(2) = 0;
+                    ROS_INFO("Adjusted start velocity direction: yaw_diff=%.1f deg", yaw_diff * 180 / M_PI);
+                }
+            }
+            
+            headState << start_pt, adjusted_start_vel, start_acc;
+            tailState << local_target_pt, local_target_vel, Eigen::Vector3d::Zero();
+
+            /* determined or random inner point */
+            if (!flag_randomPolyTraj)
+            {
+                if (innerPs.cols() != 0)
+                {
+                    ROS_ERROR("innerPs.cols() != 0");
+                }
+
+                piece_nums = 1;
+                piece_dur_vec.resize(1);
+                piece_dur_vec(0) = init_of_init_totaldur;
+            }
+            else
+            {
+                Eigen::Vector3d horizen_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
+                Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizen_dir)).normalized();
+                innerPs.resize(3, 1);
+                innerPs = (start_pt + local_target_pt) / 2 +
+                          (((double)rand()) / RAND_MAX - 0.5) *
+                              (start_pt - local_target_pt).norm() *
+                              horizen_dir * 0.8 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989) +
+                          (((double)rand()) / RAND_MAX - 0.5) *
+                              (start_pt - local_target_pt).norm() *
+                              vertical_dir * 0.4 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989);
+
+                piece_nums = 2;
+                piece_dur_vec.resize(2);
+                piece_dur_vec = Eigen::Vector2d(init_of_init_totaldur / 2, init_of_init_totaldur / 2);
+            }
+
+            /* generate the init of init trajectory */
+            initMJO.reset(headState, tailState, piece_nums);
+            initMJO.generate(innerPs, piece_dur_vec);
+            poly_traj::Trajectory initTraj = initMJO.getTraj();
+
+            /* generate the real init trajectory */
+            piece_nums = round((headState.col(0) - tailState.col(0)).norm() / pp_.ctrl_pt_dist);
+            if (piece_nums < 2)
+                piece_nums = 2;
+            double piece_dur = init_of_init_totaldur / (double)piece_nums;
+            piece_dur_vec.resize(piece_nums);
+            piece_dur_vec = Eigen::VectorXd::Constant(piece_nums, ts);
+            innerPs.resize(3, piece_nums - 1);
+            int id = 0;
+            double t_s = piece_dur, t_e = init_of_init_totaldur - piece_dur / 2;
+            double fixed_z = start_pt(2); // 固定 Z 坐标为起点的 Z
+            for (double t = t_s; t < t_e; t += piece_dur)
+            {
+                innerPs.col(id) = initTraj.getPos(t);
+                innerPs.col(id)(2) = fixed_z; // 强制 Z 坐标保持一致
+                id++;
+            }
+            if (id != piece_nums - 1)
+            {
+                ROS_ERROR("Should not happen! x_x");
+                return false;
+            }
+            initMJO.reset(headState, tailState, piece_nums);
+            initMJO.generate(innerPs, piece_dur_vec);
+        }
+        else /*** case 2: initialize from previous optimal trajectory ***/
+        {
+            if (global_data_.last_glb_t_of_lc_tgt_ < 0.0)
+            {
+                ROS_ERROR("You are initialzing a trajectory from a previous optimal trajectory, but no previous trajectories up to now.");
+                return false;
+            }
+
+            /* the trajectory time system is a little bit complicated... */
+            double passed_t_on_lctraj = ros::Time::now().toSec() - local_data_.start_time_.toSec();
+            double t_to_lc_end = local_data_.duration_ - passed_t_on_lctraj;
+            if (t_to_lc_end < 0)
+            {
+                ROS_INFO("t_to_lc_end < 0, exit and wait for another call.");
+                return false;
+            }
+            double t_to_lc_tgt = t_to_lc_end +
+                                 (global_data_.glb_t_of_lc_tgt_ - global_data_.last_glb_t_of_lc_tgt_);
+            int piece_nums = ceil((start_pt - local_target_pt).norm() / pp_.ctrl_pt_dist);
+            if (piece_nums < 2)
+                piece_nums = 2;
+
+            Eigen::Matrix3d headState, tailState;
+            Eigen::MatrixXd innerPs(3, piece_nums - 1);
+            Eigen::VectorXd piece_dur_vec = Eigen::VectorXd::Constant(piece_nums, t_to_lc_tgt / piece_nums);
+            headState << start_pt, start_vel, start_acc;
+            tailState << local_target_pt, local_target_vel, Eigen::Vector3d::Zero();
+
+            double fixed_z = start_pt(2); // 固定 Z 坐标
+            double t = piece_dur_vec(0);
+            for (int i = 0; i < piece_nums - 1; ++i)
+            {
+                if (t < t_to_lc_end)
+                {
+                    innerPs.col(i) = local_data_.minco_traj_.getPos(t + passed_t_on_lctraj);
+                }
+                else if (t <= t_to_lc_tgt)
+                {
+                    double glb_t = t - t_to_lc_end + global_data_.last_glb_t_of_lc_tgt_ - global_data_.global_start_time_.toSec();
+                    innerPs.col(i) = global_data_.global_traj_.evaluate(glb_t);
+                }
+                else
+                {
+                    ROS_ERROR("Should not happen! x_x 0x88 t=%.2f, t_to_lc_end=%.2f, t_to_lc_tgt=%.2f", t, t_to_lc_end, t_to_lc_tgt);
+                }
+                
+                innerPs.col(i)(2) = fixed_z; // 强制 Z 坐标保持一致
+
+                t += piece_dur_vec(i + 1);
+            }
+
+            initMJO.reset(headState, tailState, piece_nums);
+            initMJO.generate(innerPs, piece_dur_vec);
+        }
+
+        return true;
+    }
+
+    bool EGOPlannerManager::setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal)
+    {
+        poly_traj::Trajectory traj = opt.getTraj();
+        
+        // 存储 MINCO 轨迹
+        local_data_.minco_traj_ = traj;
+        local_data_.use_minco_traj_ = true; // 标记使用 MINCO 轨迹
+        // 注意：start_time_ 由 FSM 在外部设置，这里不设置
+        local_data_.duration_ = traj.getTotalDuration();
+        local_data_.traj_id_++;
+        local_data_.start_pos_ = traj.getJuncPos(0);
+        
+        // 为了兼容性和发布，生成高精度 B 样条近似
+        // 使用更密集的采样以提高精度
+        double dt = pp_.ctrl_pt_dist / pp_.max_vel_ * 0.5; // 使用更小的时间步长
+        int sample_num = std::max(10, (int)(local_data_.duration_ / dt));
+        dt = local_data_.duration_ / sample_num;
+        
+        vector<Eigen::Vector3d> point_set;
+        for (int i = 0; i <= sample_num; ++i)
+        {
+            double t = std::min(i * dt, local_data_.duration_);
+            point_set.push_back(traj.getPos(t));
+        }
+        
+        vector<Eigen::Vector3d> start_end_derivatives;
+        start_end_derivatives.push_back(traj.getVel(0.0));
+        start_end_derivatives.push_back(traj.getVel(local_data_.duration_));
+        start_end_derivatives.push_back(traj.getAcc(0.0));
+        start_end_derivatives.push_back(traj.getAcc(local_data_.duration_));
+        
+        Eigen::MatrixXd ctrl_pts;
+        UniformBspline::parameterizeToBspline(dt, point_set, start_end_derivatives, ctrl_pts);
+        
+        // B 样条仅用于发布，实际评估使用 MINCO
+        local_data_.position_traj_ = UniformBspline(ctrl_pts, 3, dt);
+        local_data_.velocity_traj_ = local_data_.position_traj_.getDerivative();
+        local_data_.acceleration_traj_ = local_data_.velocity_traj_.getDerivative();
+        
+        return true;
     }
 
 } // namespace ego_planner

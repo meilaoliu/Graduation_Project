@@ -12,6 +12,11 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <stdlib.h>
 
+// 前向声明，避免循环依赖
+namespace poly_traj {
+  class Trajectory;
+}
+
 using std::vector;
 namespace ego_planner
 {
@@ -36,7 +41,7 @@ namespace ego_planner
     typedef std::shared_ptr<PlanningVisualization> Ptr;
 
     void displayMarkerList(ros::Publisher &pub, const vector<Eigen::Vector3d> &list, double scale,
-                           Eigen::Vector4d color, int id);
+                           Eigen::Vector4d color, int id, bool show_sphere = true);
     void generatePathDisplayArray(visualization_msgs::MarkerArray &array,
                                   const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id);
     void generateArrowDisplayArray(visualization_msgs::MarkerArray &array,
@@ -45,6 +50,8 @@ namespace ego_planner
     void displayGlobalPathList(vector<Eigen::Vector3d> global_pts, const double scale, int id);
     void displayInitPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id);
     void displayOptimalList(Eigen::MatrixXd optimal_pts, int id);
+    void displayMincoTraj(const poly_traj::Trajectory &traj, double sample_dt, int id);
+    void displayMultiOptimalPathList(vector<vector<Eigen::Vector3d>> optimal_trajs, const double scale);
     void displayAStarList(std::vector<std::vector<Eigen::Vector3d>> a_star_paths, int id);
     void displayArrowList(ros::Publisher &pub, const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id);
     // void displayIntermediateState(ros::Publisher& intermediate_pub, ego_planner::BsplineOptimizer::Ptr optimizer, double sleep_time, const int start_iteration);

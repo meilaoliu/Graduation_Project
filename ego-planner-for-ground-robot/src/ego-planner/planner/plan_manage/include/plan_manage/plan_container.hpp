@@ -7,6 +7,7 @@
 
 #include <bspline_opt/uniform_bspline.h>
 #include <traj_utils/polynomial_traj.h>
+#include <minco_opt/poly_traj_utils.hpp>
 
 using std::vector;
 
@@ -18,7 +19,9 @@ namespace ego_planner
   private:
   public:
     PolynomialTraj global_traj_;
+    poly_traj::Trajectory minco_traj_;
     vector<UniformBspline> local_traj_;
+    bool use_minco_ = false;
 
     double global_duration_;
     ros::Time global_start_time_;
@@ -26,6 +29,10 @@ namespace ego_planner
     double time_increase_;
     double last_time_inc_;
     double last_progress_time_;
+    
+    // MINCO specific
+    double glb_t_of_lc_tgt_;
+    double last_glb_t_of_lc_tgt_;
 
     GlobalTrajData(/* args */) {}
 
@@ -64,6 +71,23 @@ namespace ego_planner
 
     Eigen::Vector3d getPosition(double t)
     {
+      if (use_minco_)
+      {
+        if (t >= -1e-3 && t <= local_start_time_)
+        {
+          return global_traj_.evaluate(t - time_increase_ + last_time_inc_);
+        }
+        else if (t >= local_end_time_ && t <= global_duration_ + 1e-3)
+        {
+          return global_traj_.evaluate(t - time_increase_);
+        }
+        else
+        {
+          return minco_traj_.getPos(t - local_start_time_);
+        }
+      }
+      else
+    {
       if (t >= -1e-3 && t <= local_start_time_)
       {
         return global_traj_.evaluate(t - time_increase_ + last_time_inc_);
@@ -77,10 +101,28 @@ namespace ego_planner
         double tm, tmp;
         local_traj_[0].getTimeSpan(tm, tmp);
         return local_traj_[0].evaluateDeBoor(tm + t - local_start_time_);
+        }
       }
     }
 
     Eigen::Vector3d getVelocity(double t)
+    {
+      if (use_minco_)
+      {
+        if (t >= -1e-3 && t <= local_start_time_)
+        {
+          return global_traj_.evaluateVel(t);
+        }
+        else if (t >= local_end_time_ && t <= global_duration_ + 1e-3)
+        {
+          return global_traj_.evaluateVel(t - time_increase_);
+        }
+        else
+        {
+          return minco_traj_.getVel(t - local_start_time_);
+        }
+      }
+      else
     {
       if (t >= -1e-3 && t <= local_start_time_)
       {
@@ -95,10 +137,28 @@ namespace ego_planner
         double tm, tmp;
         local_traj_[0].getTimeSpan(tm, tmp);
         return local_traj_[1].evaluateDeBoor(tm + t - local_start_time_);
+        }
       }
     }
 
     Eigen::Vector3d getAcceleration(double t)
+    {
+      if (use_minco_)
+      {
+        if (t >= -1e-3 && t <= local_start_time_)
+        {
+          return global_traj_.evaluateAcc(t);
+        }
+        else if (t >= local_end_time_ && t <= global_duration_ + 1e-3)
+        {
+          return global_traj_.evaluateAcc(t - time_increase_);
+        }
+        else
+        {
+          return minco_traj_.getAcc(t - local_start_time_);
+        }
+      }
+      else
     {
       if (t >= -1e-3 && t <= local_start_time_)
       {
@@ -113,6 +173,7 @@ namespace ego_planner
         double tm, tmp;
         local_traj_[0].getTimeSpan(tm, tmp);
         return local_traj_[2].evaluateDeBoor(tm + t - local_start_time_);
+        }
       }
     }
 
@@ -195,6 +256,8 @@ namespace ego_planner
     double ctrl_pt_dist;                  // distance between adjacient B-spline control points
     double feasibility_tolerance_;        // permitted ratio of vel/acc exceeding limits
     double planning_horizen_;
+    bool use_minco_ = false;
+    bool use_multitopology_trajs_ = false; // 是否使用多拓扑轨迹
 
     /* processing time */
     double time_search_ = 0.0;
@@ -212,6 +275,8 @@ namespace ego_planner
     ros::Time start_time_;
     Eigen::Vector3d start_pos_;
     UniformBspline position_traj_, velocity_traj_, acceleration_traj_;
+    poly_traj::Trajectory minco_traj_;
+    bool use_minco_traj_ = false; // 标志位：是否使用 MINCO 轨迹
   };
 
 } // namespace ego_planner

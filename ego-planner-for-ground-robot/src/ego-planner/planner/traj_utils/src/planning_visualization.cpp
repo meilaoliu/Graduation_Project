@@ -1,5 +1,8 @@
 #include <traj_utils/planning_visualization.h>
 
+// 在 cpp 中包含 MINCO 头文件，避免循环依赖
+#include <minco_opt/poly_traj_utils.hpp>
+
 using std::cout;
 using std::endl;
 namespace ego_planner
@@ -17,7 +20,7 @@ namespace ego_planner
 
   // // real ids used: {id, id+1000}
   void PlanningVisualization::displayMarkerList(ros::Publisher &pub, const vector<Eigen::Vector3d> &list, double scale,
-                                                Eigen::Vector4d color, int id)
+                                                Eigen::Vector4d color, int id, bool show_sphere)
   {
     visualization_msgs::Marker sphere, line_strip;
     sphere.header.frame_id = line_strip.header.frame_id = "map";
@@ -43,10 +46,10 @@ namespace ego_planner
       pt.x = list[i](0);
       pt.y = list[i](1);
       pt.z = list[i](2);
-      sphere.points.push_back(pt);
+      if (show_sphere) sphere.points.push_back(pt);
       line_strip.points.push_back(pt);
     }
-    pub.publish(sphere);
+    if (show_sphere) pub.publish(sphere);
     pub.publish(line_strip);
   }
 
@@ -206,6 +209,75 @@ namespace ego_planner
     }
     Eigen::Vector4d color(1, 0, 0, 1);
     displayMarkerList(optimal_list_pub, list, 0.15, color, id);
+  }
+
+  void PlanningVisualization::displayMincoTraj(const poly_traj::Trajectory &traj, double sample_dt, int id)
+  {
+    if (optimal_list_pub.getNumSubscribers() == 0)
+    {
+      return;
+    }
+
+    vector<Eigen::Vector3d> list;
+    double duration = traj.getTotalDuration();
+    for (double t = 0.0; t <= duration; t += sample_dt)
+    {
+      Eigen::Vector3d pt = traj.getPos(std::min(t, duration));
+      list.push_back(pt);
+    }
+    
+    Eigen::Vector4d color(1, 0, 0, 1); // 红色
+    displayMarkerList(optimal_list_pub, list, 0.15, color, id);
+  }
+
+  void PlanningVisualization::displayMultiOptimalPathList(vector<vector<Eigen::Vector3d>> optimal_trajs, const double scale)
+  {
+    if (optimal_list_pub.getNumSubscribers() == 0)
+    {
+      return;
+    }
+
+    static int last_nums = 0;
+
+    // 清除之前的所有轨迹（包括单轨迹模式的 id=0）
+    // 首先清除 id=0 的 Marker（单轨迹模式使用）
+    {
+      visualization_msgs::Marker sphere, line_strip;
+      sphere.header.frame_id = line_strip.header.frame_id = "map";
+      sphere.header.stamp = line_strip.header.stamp = ros::Time::now();
+      sphere.type = visualization_msgs::Marker::SPHERE_LIST;
+      line_strip.type = visualization_msgs::Marker::LINE_STRIP;
+      sphere.action = line_strip.action = visualization_msgs::Marker::DELETE;
+      sphere.id = 0;
+      line_strip.id = 1000; // LINE_STRIP 的 id
+      optimal_list_pub.publish(sphere);
+      optimal_list_pub.publish(line_strip);
+    }
+    
+    // 清除多轨迹模式的 Marker
+    for (int id = 0; id < last_nums; id++)
+    {
+      visualization_msgs::Marker sphere, line_strip;
+      sphere.header.frame_id = line_strip.header.frame_id = "map";
+      sphere.header.stamp = line_strip.header.stamp = ros::Time::now();
+      sphere.type = visualization_msgs::Marker::SPHERE_LIST;
+      line_strip.type = visualization_msgs::Marker::LINE_STRIP;
+      sphere.action = line_strip.action = visualization_msgs::Marker::DELETE;
+      sphere.id = id + 10;
+      line_strip.id = id + 10 + 1000;
+      optimal_list_pub.publish(sphere);
+      optimal_list_pub.publish(line_strip);
+    }
+    last_nums = 0;
+
+    // 显示新的多条轨迹
+    for (int id = 0; id < (int)optimal_trajs.size(); id++)
+    {
+      Eigen::Vector4d color(1, 0, 0, 0.7); // 半透明红色
+      displayMarkerList(optimal_list_pub, optimal_trajs[id], scale, color, id + 10);
+      ros::Duration(0.001).sleep();
+      last_nums++;
+    }
   }
 
   void PlanningVisualization::displayAStarList(std::vector<std::vector<Eigen::Vector3d>> a_star_paths, int id /* = Eigen::Vector4d(0.5,0.5,0,1)*/)

@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   plan_env
   path_searching
   bspline_opt
+  minco_opt
   traj_utils
   message_generation
   cv_bridge
@@ -27,6 +28,7 @@ find_package(catkin REQUIRED COMPONENTS
 add_message_files(
   FILES
   Bspline.msg
+  MINCOTraj.msg
   DataDisp.msg
   )
   
@@ -41,7 +43,7 @@ generate_messages(
 catkin_package(
  INCLUDE_DIRS include
  LIBRARIES ego_planner
- CATKIN_DEPENDS plan_env path_searching bspline_opt traj_utils message_runtime mpc_controller
+ CATKIN_DEPENDS plan_env path_searching bspline_opt minco_opt traj_utils message_runtime mpc_controller
 #  DEPENDS system_lib
 )
 

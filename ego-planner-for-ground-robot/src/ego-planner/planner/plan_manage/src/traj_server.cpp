@@ -1,8 +1,10 @@
 #include "bspline_opt/uniform_bspline.h"
+#include "minco_opt/poly_traj_utils.hpp"
 #include "MPC.hpp"
 #include "nav_msgs/Odometry.h"
 #include "geometry_msgs/Twist.h"
 #include "ego_planner/Bspline.h"
+#include "ego_planner/MINCOTraj.h"
 #include "std_msgs/UInt8.h"
 #include "std_msgs/UInt8MultiArray.h"
 #include "geometry_msgs/PoseStamped.h"
@@ -16,7 +18,6 @@
 #include "time.h"
 
 #define PI 3.1415926
-#define yaw_error_max 90.0/180*PI
 #define N 15
 
 ros::Publisher vel_cmd_pub;
@@ -29,8 +30,10 @@ double vel_gain[3] = {0, 0, 0};
 using ego_planner::UniformBspline;
 
 bool receive_traj_ = false;
+bool use_minco_traj_ = false; // 标志：是否使用 MINCO 轨迹
 bool is_orientation_init = false;
 vector<UniformBspline> traj_;
+boost::shared_ptr<poly_traj::Trajectory> minco_traj_; // MINCO 轨迹
 double traj_duration_;
 ros::Time start_time_,time_s,time_e;
 int traj_id_;
@@ -49,6 +52,9 @@ enum DIRECTION {POSITIVE=0,NEGATIVE=1};
 
 // yaw control
 double t_step;
+
+// 前进模式控制
+bool forward_only_ = true;  // 默认只允许前进，不允许倒车
 
 std_msgs::UInt8 stop_command;
 
@@ -89,10 +95,53 @@ void bsplineCallback(ego_planner::BsplineConstPtr msg)
 
   traj_duration_ = traj_[0].getTimeSum();
 
-  //ROS_INFO("Receive b-spline trajectory!");
-
+  // B 样条模式：只有当 FSM 使用 B 样条优化器时才会收到此消息
+  // MINCO 模式下会收到 MINCOTraj 消息，不会进入此回调
+  use_minco_traj_ = false;
   receive_traj_ = true;
 
+}
+
+void mincoTrajCallback(ego_planner::MINCOTrajConstPtr msg)
+{
+  if (msg->order != 5)
+  {
+    ROS_ERROR("[traj_server] Only support trajectory order equals 5 now!");
+    return;
+  }
+  if (msg->duration.size() * (msg->order + 1) != msg->coef_x.size())
+  {
+    ROS_ERROR("[traj_server] WRONG trajectory parameters!");
+    return;
+  }
+
+  int piece_nums = msg->duration.size();
+  std::vector<double> dura(piece_nums);
+  std::vector<poly_traj::CoefficientMat> cMats(piece_nums);
+  
+  for (int i = 0; i < piece_nums; ++i)
+  {
+    int i6 = i * 6;
+    cMats[i].row(0) << msg->coef_x[i6 + 0], msg->coef_x[i6 + 1], msg->coef_x[i6 + 2],
+        msg->coef_x[i6 + 3], msg->coef_x[i6 + 4], msg->coef_x[i6 + 5];
+    cMats[i].row(1) << msg->coef_y[i6 + 0], msg->coef_y[i6 + 1], msg->coef_y[i6 + 2],
+        msg->coef_y[i6 + 3], msg->coef_y[i6 + 4], msg->coef_y[i6 + 5];
+    cMats[i].row(2) << msg->coef_z[i6 + 0], msg->coef_z[i6 + 1], msg->coef_z[i6 + 2],
+        msg->coef_z[i6 + 3], msg->coef_z[i6 + 4], msg->coef_z[i6 + 5];
+
+    dura[i] = msg->duration[i];
+  }
+
+  minco_traj_.reset(new poly_traj::Trajectory(dura, cMats));
+
+  start_time_ = msg->start_time;
+  traj_duration_ = minco_traj_->getTotalDuration();
+  traj_id_ = msg->traj_id;
+
+  use_minco_traj_ = true; // MINCO 模式
+  receive_traj_ = true;
+  
+  ROS_INFO("[traj_server] Received MINCO trajectory with %d pieces, duration=%.2f", piece_nums, traj_duration_);
 }
 
 void poseCallback(geometry_msgs::PoseStampedConstPtr msg)
@@ -125,35 +174,79 @@ void MPC_calculate(double &t_cur)
 
     //ROS_INFO("Run to here!");
 
-    //Eigen::Vector3d pos_first = traj_[0].evaluateDeBoor(t_cur);
-    //Eigen::Vector3d pos_second = traj_[0].evaluateDeBoor(t_cur+t_step);
-    Eigen::Vector3d vel_start = traj_[1].evaluateDeBoor(t_cur);
-    double yaw_start = atan2(vel_start(1),vel_start(0));
+    // 根据轨迹类型获取速度和位置
+    Eigen::Vector3d vel_start, pos_final_3d;
+    if (use_minco_traj_)
+    {
+      vel_start = minco_traj_->getVel(t_cur);
+      pos_final_3d = minco_traj_->getPos(traj_duration_);
+    }
+    else
+    {
+      vel_start = traj_[1].evaluateDeBoor(t_cur);
+      pos_final_3d = traj_[0].evaluateDeBoor(traj_duration_);
+    }
+    
+    double yaw_start;
+    // 如果起始速度太小，使用稍后的点来计算方向，避免 atan2(0,0)
+    if (vel_start.norm() < 0.1)
+    {
+        Eigen::Vector3d pos_now, pos_next;
+        double t_next = std::min(t_cur + 0.5, traj_duration_);
+        if (use_minco_traj_)
+        {
+            pos_now = minco_traj_->getPos(t_cur);
+            pos_next = minco_traj_->getPos(t_next);
+        }
+        else
+        {
+            pos_now = traj_[0].evaluateDeBoor(t_cur);
+            pos_next = traj_[0].evaluateDeBoor(t_next);
+        }
+        yaw_start = atan2((pos_next - pos_now)(1), (pos_next - pos_now)(0));
+        // ROS_INFO_THROTTLE(1.0, "[Traj Server] Low speed, using lookahead for yaw_start: %.2f", yaw_start);
+    }
+    else
+    {
+        yaw_start = atan2(vel_start(1), vel_start(0));
+    }
+
     bool is_orientation_adjust=false;
     double orientation_adjust=0;
-    pos_final = traj_[0].evaluateDeBoor(traj_duration_);
+    pos_final = pos_final_3d;
 
-//    if(abs(yaw-yaw_start)>yaw_error_max&&is_orientation_init==false)
-//    {
-//        ROS_INFO("current yaw : %5.3f , start yaw : %5.3f",yaw,yaw_start);
-//        if(abs(yaw-yaw_start)>PI)
-//        {
-//            cmd.twist.linear.x=0;
-//            cmd.twist.angular.z = -(yaw_start-yaw)/abs(yaw-yaw_start)*PI/10;
-//        }
-//        else
-//        {
-//            cmd.twist.linear.x=0;
-//            cmd.twist.angular.z = (yaw_start-yaw)/abs(yaw-yaw_start)*PI/10;
-//        }
-//        vel_cmd_pub.publish(cmd);
-//        start_time_ = ros::Time::now();
-//        //cout<<"current yaw : "<<yaw*180/PI<<endl;
-//        //cout<<"target yaw : "<<yaw_start*180/PI<<endl;
-//        //cout<<"current w : "<<web_cmd_vel.angular.z<<endl;
-//    }
-//    else
-//    {
+    // forward_only 模式：检查轨迹方向与车头方向
+    if (forward_only_)
+    {
+        double yaw_diff = yaw_start - yaw;
+        // 归一化到 [-PI, PI]
+        while (yaw_diff > PI) yaw_diff -= 2 * PI;
+        while (yaw_diff < -PI) yaw_diff += 2 * PI;
+        
+        // 调试日志：帮助分析为什么不掉头
+        ROS_INFO_THROTTLE(0.5, "[TrajServer DEBUG] V=%.2f, yaw=%.1f, traj=%.1f, diff=%.1f", 
+            vel_start.norm(), yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_diff * 180.0 / PI);
+
+        // 如果轨迹方向与车头方向相差超过 90 度，停止并原地转向
+        if (abs(yaw_diff) > PI / 2.0)
+        {
+            cmd.linear.x = 0;  // 停止前进
+            // 原地转向，朝向轨迹方向
+            double turn_speed = 0.5;  // 转向速度 rad/s
+            cmd.angular.z = (yaw_diff > 0) ? turn_speed : -turn_speed;
+            
+            static int print_count = 0;
+            if (print_count++ % 10 == 0)
+            {
+                ROS_WARN("[Traj server] Turning: yaw=%.1f, traj=%.1f, diff=%.1f deg", 
+                         yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_diff * 180.0 / PI);
+            }
+            
+            vel_cmd_pub.publish(cmd);
+            return;  // 不执行 MPC，等待转向完成
+        }
+    }
+
         is_orientation_init=true;
         for(int i=0;i<N;i++)
         {
@@ -161,14 +254,25 @@ void MPC_calculate(double &t_cur)
             t_k = t_cur+i*t_step;
             t_k_1 = t_cur+(i+1)*t_step;
 
+            // 根据轨迹类型获取位置和速度
+            if (use_minco_traj_)
+            {
+              pos_r = minco_traj_->getPos(t_k);
+              pos_r_1 = minco_traj_->getPos(t_k_1);
+              v_r_1 = minco_traj_->getVel(t_k);
+              v_r_2 = minco_traj_->getVel(t_k_1);
+            }
+            else
+            {
             pos_r = traj_[0].evaluateDeBoor(t_k);
             pos_r_1 = traj_[0].evaluateDeBoor(t_k_1);
+              v_r_1 = traj_[1].evaluateDeBoor(t_k);
+              v_r_2 = traj_[1].evaluateDeBoor(t_k_1);
+            }
 
             x_r(0) = pos_r(0);
             x_r(1) = pos_r(1);
 
-            v_r_1 = traj_[1].evaluateDeBoor(t_k);
-            v_r_2 = traj_[1].evaluateDeBoor(t_k_1);
             v_r_1(2)=0;
             v_r_2(2)=0;
             v_linear_1 = v_r_1.norm();
@@ -255,13 +359,31 @@ void MPC_calculate(double &t_cur)
 
 
 //            cout<<"Xk "<<" : "<<endl<<X_k<<endl;
-        if(dir.data == NEGATIVE)
+        double vel_cmd = u_k.col(0)(0);
+        
+        // 前进模式控制
+        if (forward_only_)
         {
-            cmd.linear.x = -u_k.col(0)(0);
+            // 只允许前进模式：
+            // 1. 忽略方向切换（不倒车）
+            // 2. 如果 MPC 输出负速度，强制为 0
+            if (vel_cmd < 0)
+        {
+                vel_cmd = 0;
+            }
+            cmd.linear.x = vel_cmd;  // 始终正向
         }
         else
         {
-            cmd.linear.x = u_k.col(0)(0);
+            // 双向模式：根据方向切换
+            if(dir.data == NEGATIVE)
+            {
+                cmd.linear.x = -vel_cmd;
+            }
+            else
+            {
+                cmd.linear.x = vel_cmd;
+            }
         }
 
         cmd.angular.z = u_k.col(0)(1);
@@ -333,7 +455,9 @@ void odometryCallback(const nav_msgs::OdometryConstPtr &msg)
     tf::quaternionMsgToTF(msg->pose.pose.orientation,quat);
     tf::Matrix3x3(quat).getRPY(roll, pitch, yaw);
 
-    if(dir.data==NEGATIVE)
+    // forward_only 模式下，不根据 dir 修改 yaw
+    // 这样 yaw 始终是真实的车头朝向
+    if (!forward_only_ && dir.data == NEGATIVE)
     {
         if(yaw>0)
         {
@@ -406,6 +530,7 @@ int main(int argc, char **argv)
 
 
   ros::Subscriber bspline_sub = node.subscribe("/planning/bspline", 10, bsplineCallback);
+  ros::Subscriber minco_sub = node.subscribe("/planning/minco_traj", 10, mincoTrajCallback);
   ros::Subscriber pose_sub = node.subscribe(pose_topic, 10, poseCallback);
   ros::Subscriber odom_sub = node.subscribe("/state_estimation", 10, odometryCallback);
   ros::Subscriber stop_sub = node.subscribe("/emergency_stop",10,stopCallback);
@@ -417,6 +542,13 @@ int main(int argc, char **argv)
   stop_command.data = 0;
   dir.data = POSITIVE;
   t_step = 0.03;
+  
+  // 读取前进模式参数
+  // 优先从全局参数 /forward_only 读取，如果没有则从 /traj_server/forward_only 读取
+  if (!ros::param::get("/forward_only", forward_only_)) {
+      ros::param::param<bool>("/traj_server/forward_only", forward_only_, true);
+  }
+  ROS_INFO("[Traj server]: forward_only = %s", forward_only_ ? "true (no reverse)" : "false (bidirectional)");
 
 
   ros::Timer cmd_timer = node.createTimer(ros::Duration(0.03), cmdCallback);

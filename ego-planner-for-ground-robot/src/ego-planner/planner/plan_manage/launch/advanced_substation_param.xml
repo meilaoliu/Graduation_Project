@@ -193,6 +193,8 @@
     <param name="manager/control_points_distance" value="0.6" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
+    <param name="manager/use_minco" value="false" type="bool"/>
+    <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
@@ -207,6 +209,17 @@
     <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
     <param name="bspline/limit_ratio" value="1.1" type="double"/>
+
+    <!-- MINCO optimization parameters -->
+    <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
+    <param name="optimization/weight_obstacle" value="5000.0" type="double"/>  <!-- 降低避障权重 -->
+    <param name="optimization/weight_obstacle_soft" value="500.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="10000.0" type="double"/>
+    <param name="optimization/weight_sqrvariance" value="5000.0" type="double"/>  <!-- 降低方差权重 -->
+    <param name="optimization/weight_time" value="50.0" type="double"/>  <!-- 降低时间权重 -->
+    <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
+    <param name="optimization/max_jer" value="10.0" type="double"/>
 
     <param name="MPC/v_max" value="1.8" type="double"/>
     <param name="MPC/w_max" value="1.2" type="double"/>

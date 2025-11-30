@@ -16,6 +16,7 @@
 #include <bspline_opt/bspline_optimizer.h>
 #include <plan_env/grid_map.h>
 #include <ego_planner/Bspline.h>
+#include <ego_planner/MINCOTraj.h>
 #include <ego_planner/DataDisp.h>
 #include <plan_manage/planner_manager.h>
 #include <traj_utils/planning_visualization.h>
@@ -63,6 +64,7 @@ namespace ego_planner
     int waypoint_num_;
     double planning_horizen_, planning_horizen_time_;
     double emergency_time_;
+    bool forward_only_; // true: 只允许前进，不允许倒车
 
     /* planning data */
     bool trigger_, have_target_, have_odom_, have_new_target_;
@@ -95,7 +97,7 @@ namespace ego_planner
     ros::NodeHandle node_;
     ros::Timer exec_timer_, safety_timer_;
     ros::Subscriber waypoint_sub_, odom_sub_;
-    ros::Publisher replan_pub_, new_pub_, bspline_pub_, data_disp_pub_,cmd_pub_,adjust_cmd_pub_,odom_adjust_pub_,dir_pub,stop_pub;
+    ros::Publisher replan_pub_, new_pub_, bspline_pub_, minco_pub_, data_disp_pub_,cmd_pub_,adjust_cmd_pub_,odom_adjust_pub_,dir_pub,stop_pub;
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
@@ -113,6 +115,7 @@ namespace ego_planner
     void planGlobalTrajbyGivenWps();
     void getLocalTarget();
     void publishBspline();
+    void publishMincoTraj();
 
     /* ROS functions */
     void execFSMCallback(const ros::TimerEvent &e);

@@ -23,12 +23,14 @@ catkin_package(
 #  DEPENDS system_lib
 )
 
+# 添加 minco_opt 的 include 路径，但不添加依赖（避免循环依赖）
 include_directories( 
     SYSTEM 
     include 
     ${catkin_INCLUDE_DIRS}
     ${Eigen3_INCLUDE_DIRS} 
     ${PCL_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/ego-planner/planner/minco_opt/include
 )
 
 link_directories(${PCL_LIBRARY_DIRS})

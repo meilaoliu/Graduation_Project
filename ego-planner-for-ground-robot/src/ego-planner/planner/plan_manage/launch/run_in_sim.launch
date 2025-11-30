@@ -87,9 +87,8 @@
 
   <node pkg="ego_planner" name="traj_server" type="traj_server" output="screen">
     <remap from="/position_cmd" to="planning/pos_cmd"/>
-
     <remap from="/odom_world" to="$(arg odom_topic)"/>
-    <param name="traj_server/time_forward" value="1.0" type="double"/>
+    <!-- forward_only 参数已移至 advanced_param.xml -->
   </node>
 
   <rosparam command="load" file="$(find patchwork)/config/params_ouster128.yaml" />

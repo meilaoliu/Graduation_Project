@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include <bspline_opt/bspline_optimizer.h>
+#include <minco_opt/poly_traj_optimizer.h>
 #include <bspline_opt/uniform_bspline.h>
 #include <ego_planner/DataDisp.h>
 #include <plan_env/grid_map.h>
@@ -29,6 +30,8 @@ namespace ego_planner
         /* main planning interface */
         bool reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
                            Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
+        bool reboundReplanMinco(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
+                           Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
         bool EmergencyStop(Eigen::Vector3d stop_pos);
         bool planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                             const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
@@ -47,6 +50,9 @@ namespace ego_planner
         PlanningVisualization::Ptr visualization_;
 
         BsplineOptimizer::Ptr bspline_optimizer_rebound_;
+        PolyTrajOptimizer::Ptr minco_optimizer_;
+        
+        bool use_minco_ = false;
 
         int continous_failures_count_{0};
 
@@ -56,6 +62,14 @@ namespace ego_planner
                             double &time_inc);
 
         bool refineTrajAlgo(UniformBspline &traj, vector<Eigen::Vector3d> &start_end_derivative, double ratio, double &ts, Eigen::MatrixXd &optimal_control_points);
+
+        bool computeInitState(
+            const Eigen::Vector3d &start_pt, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
+            const Eigen::Vector3d &local_target_pt, const Eigen::Vector3d &local_target_vel,
+            const bool flag_polyInit, const bool flag_randomPolyTraj, const double &ts,
+            poly_traj::MinJerkOpt &initMJO);
+
+        bool setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal);
 
         // !SECTION stable
 
