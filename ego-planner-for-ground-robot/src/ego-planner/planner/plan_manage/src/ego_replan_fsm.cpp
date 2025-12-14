@@ -292,7 +292,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     }
 }
 
-
   void EGOReplanFSM::odometryCallback(const nav_msgs::OdometryConstPtr &msg)
   {
     odom_pos_(0) = msg->pose.pose.position.x;
@@ -459,10 +458,24 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     case ADJUST_POSE:
     {
-//        if(last_state_!=WAIT_TARGET&&last_state_!=EMERGENCY_STOP)
-//        {
-//            callEmergencyStop(odom_pos_);
-//        }
+        // forward_only 模式下，必须等待车辆完全停止后才能开始原地转向
+        // 否则会边转边移动，导致偏离当前位置
+        double linear_speed = odom_vel_.head<2>().norm();  // 计算2D平面线速度
+        if (forward_only_ && linear_speed > 0.1)  // 如果线速度 > 0.1 m/s，继续等待
+        {
+            // 发送停止命令
+            cmd_vel.linear.x = 0;
+            cmd_vel.angular.z = 0;
+            cmd_pub_.publish(cmd_vel);
+            
+            static int wait_count = 0;
+            if (wait_count++ % 50 == 0)  // 每0.5秒打印一次
+            {
+                ROS_INFO("[ADJUST_POSE] Waiting for vehicle to stop: speed=%.3f m/s", linear_speed);
+            }
+            break;  // 不执行后续的转向逻辑，等待下次回调
+        }
+        
         yaw_error = yaw_start-yaw;
         //first step : calculate the yaw error
         if(abs(yaw_error)>PI)
@@ -492,11 +505,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             cmd_vel.linear.x = 0;
             cmd_vel.angular.z =0;
             cmd_pub_.publish(cmd_vel);
-            changeFSMExecState(EXEC_TRAJ, "FSM");
             adjust_cmd_pub_.publish(is_adjust_pose);
-            auto info = &planner_manager_->local_data_;
-            info->start_time_ = ros::Time::now();
-            publishBspline();
+            
+            // 原地转向完成后，必须重新规划轨迹
+            // 因为之前的轨迹是基于旧的状态规划的，直接恢复会导致状态不匹配
+            // GEN_NEW_TRAJ 会调用 callReboundReplan(true) 从当前静止状态重新规划
+            changeFSMExecState(GEN_NEW_TRAJ, "FSM");
         }
         break;
     }
@@ -623,17 +637,30 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           }
           yaw_start = atan2(vel_start(1),vel_start(0));
           yaw_error = yaw_start-yaw;
-
+          
           info->start_time_ = ros::Time::now();
           std_msgs::UInt8 stop_cmd;
           stop_cmd.data = 0;
           stop_pub.publish(stop_cmd);
           publishBspline();
+          
+          // 可视化重规划的轨迹
+          if (planner_manager_->pp_.use_minco_ && info->use_minco_traj_)
+          {
+            visualization_->displayMincoTraj(info->minco_traj_, 0.05, 0);
+          }
+          
           changeFSMExecState(EXEC_TRAJ, "FSM");
       }
       else
       {
-          changeFSMExecState(REPLAN_TRAJ, "FSM");
+          // planFromCurrentTraj()可能已经将状态改为ADJUST_POSE
+          // 只有当状态仍是REPLAN_TRAJ时才重试
+          if (exec_state_ == REPLAN_TRAJ)
+          {
+              changeFSMExecState(REPLAN_TRAJ, "FSM");
+          }
+          // 否则保持planFromCurrentTraj()设置的状态（如ADJUST_POSE）
       }
 
       break;
@@ -658,12 +685,29 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
 
       /* && (end_pt_ - pos).norm() < 0.5 */
+      double dist_to_goal = (end_pt_ - pos).norm();
+      double dist_to_goal_actual = (end_pt_ - odom_pos_).norm();
+      
       if (t_cur > info->duration_ - 1e-2)
       {
-        have_target_ = false;
-
-        changeFSMExecState(WAIT_TARGET, "FSM");
-        return;
+        // 到达轨迹终点 - 添加调试信息
+        ROS_INFO("[FSM] Traj ended: t=%.2fs, dur=%.2fs, dist_traj=%.2fm, dist_actual=%.2fm", 
+                 t_cur, info->duration_, dist_to_goal, dist_to_goal_actual);
+        
+        // 只有当实际距离也很近时才认为到达目标
+        if (dist_to_goal_actual < 0.5)
+        {
+          have_target_ = false;
+          changeFSMExecState(WAIT_TARGET, "FSM");
+          return;
+        }
+        else
+        {
+          // 轨迹结束但还没到目标，重规划
+          ROS_WARN("[FSM] Traj ended but not at goal (dist=%.2fm), replanning!", dist_to_goal_actual);
+          changeFSMExecState(REPLAN_TRAJ, "FSM");
+          return;
+        }
       }
       else if ((end_pt_ - pos).norm() < no_replan_thresh_)
       {
@@ -723,6 +767,58 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       start_pt_ = info->position_traj_.evaluateDeBoorT(t_cur);
       start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
       start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
+    }
+
+    // 验证初始状态的曲率和角速度
+    // 如果过高，强制降低速度以避免优化失败
+    double v_norm = start_vel_.head<2>().norm(); // 只考虑2D平面
+    if (v_norm > 0.1)
+    {
+      // 计算曲率: κ = |v × a| / |v|^3
+      Eigen::Vector3d cross = start_vel_.cross(start_acc_);
+      double curvature = cross.norm() / (v_norm * v_norm * v_norm);
+      
+      // 计算角速度: ω = κ * v
+      double angVel = curvature * v_norm;
+      
+      // 获取限制值（使用默认值，因为FSM不直接访问优化器参数）
+      double max_curv = 3.0;    // 这应与launch文件中的max_k一致
+      double max_w = 3.5;       // 这应与launch文件中的max_w一致
+      
+      // 如果曲率或角速度超出限制，按比例降低速度
+      bool need_adjust = false;
+      double scale_factor = 1.0;
+      
+      if (curvature > max_curv * 2.0)  // 如果超过2倍限制
+      {
+        need_adjust = true;
+        scale_factor = std::min(scale_factor, 0.3);  // 大幅降低速度
+        ROS_WARN("[FSM] High curvature=%.2f (max=%.2f), reducing velocity", curvature, max_curv);
+      }
+      else if (curvature > max_curv)
+      {
+        need_adjust = true;
+        scale_factor = std::min(scale_factor, max_curv / curvature);
+      }
+      
+      if (angVel > max_w * 2.0)  // 如果超过2倍限制
+      {
+        need_adjust = true;
+        scale_factor = std::min(scale_factor, 0.3);
+        ROS_WARN("[FSM] High angular velocity=%.2f (max=%.2f), reducing velocity", angVel, max_w);
+      }
+      else if (angVel > max_w)
+      {
+        need_adjust = true;
+        scale_factor = std::min(scale_factor, max_w / angVel);
+      }
+      
+      if (need_adjust)
+      {
+        start_vel_ *= scale_factor;
+        start_acc_ *= scale_factor * scale_factor;  // 加速度缩放平方
+        ROS_INFO("[FSM] Adjusted initial state: vel_scale=%.2f", scale_factor);
+      }
     }
 
     // 强制检查速度方向与目标方向
@@ -929,40 +1025,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     planner_manager_->EmergencyStop(stop_pos);
 
+    // 遵循 main_ws 设计：直接发布 MINCO 轨迹消息
     auto info = &planner_manager_->local_data_;
-    if (info->use_minco_traj_)
-    {
-      // 使用 MINCO 轨迹时，仍然发布 B 样条近似（用于可视化和兼容性）
-      // 但实际控制应该基于 MINCO 轨迹
-      ROS_INFO_ONCE("Publishing B-spline approximation of MINCO trajectory");
-    }
-
-    /* publish traj */
-    ego_planner::Bspline bspline;
-    bspline.order = 3;
-    bspline.start_time = info->start_time_;
-    bspline.traj_id = info->traj_id_;
-
-    // Emergency stop 总是使用 B 样条（因为是静止点）
-    Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
-    bspline.pos_pts.reserve(pos_pts.cols());
-    for (int i = 0; i < pos_pts.cols(); ++i)
-    {
-      geometry_msgs::Point pt;
-      pt.x = pos_pts(0, i);
-      pt.y = pos_pts(1, i);
-      pt.z = pos_pts(2, i);
-      bspline.pos_pts.push_back(pt);
-    }
-
-    Eigen::VectorXd knots = info->position_traj_.getKnot();
-    bspline.knots.reserve(knots.rows());
-    for (int i = 0; i < knots.rows(); ++i)
-    {
-      bspline.knots.push_back(knots(i));
-    }
-
-    bspline_pub_.publish(bspline);
+    info->start_time_ = ros::Time::now();
+    
+    // 发布 MINCO 轨迹消息
+    publishMincoTraj();
 
     return true;
   }
@@ -1020,77 +1088,40 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
   void EGOReplanFSM::publishBspline() {
 
-      auto info = &planner_manager_->local_data_;
-      // 注意：start_time_ 应该在调用 publishBspline() 之前设置，这里不再重复设置
-      // 这样可以确保掉头完成后轨迹从正确的时间开始
-    /* publish traj */
-    ego_planner::Bspline bspline;
-    bspline.order = 3;
-    bspline.start_time = info->start_time_;
-    bspline.traj_id = info->traj_id_;
-
+    auto info = &planner_manager_->local_data_;
+    
+    // 根据轨迹类型选择发布方式
     if (planner_manager_->pp_.use_minco_)
     {
-      // MINCO 轨迹：采样后发布为 B 样条格式（供 MPC 使用）
-      // 注意：这里发布的是采样点，MPC 需要适配
-      double dt = 0.1;
-      int sample_num = std::max(5, (int)(info->duration_ / dt));
-      dt = info->duration_ / sample_num;
-      
-      bspline.pos_pts.reserve(sample_num + 1);
-      bspline.knots.reserve(sample_num + 4); // B 样条节点数
-      
-      // 采样位置点
-      for (int i = 0; i <= sample_num; ++i)
-      {
-        double t = std::min(i * dt, info->duration_);
-        Eigen::Vector3d pt = info->minco_traj_.getPos(t);
-        geometry_msgs::Point gpt;
-        gpt.x = pt(0);
-        gpt.y = pt(1);
-        gpt.z = odom_pos_(2); // 使用当前 Z 高度
-        bspline.pos_pts.push_back(gpt);
-      }
-      
-      // 生成节点向量（均匀 B 样条）
-      for (int i = 0; i < sample_num + 4; ++i)
-      {
-        bspline.knots.push_back(i * dt);
-      }
+      // MINCO 模式：直接发布 MINCO 轨迹消息
+      publishMincoTraj();
     }
     else
     {
-      // B 样条轨迹：直接发布控制点
+      // B 样条模式：发布 B 样条消息
+      ego_planner::Bspline bspline;
+      bspline.order = 3;
+      bspline.start_time = info->start_time_;
+      bspline.traj_id = info->traj_id_;
+
       Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
       bspline.pos_pts.reserve(pos_pts.cols());
-      Eigen::Vector3d point_temp;
       for (int i = 0; i < pos_pts.cols(); ++i)
       {
-          geometry_msgs::Point pt;
-          pt.x = pos_pts(0, i);
-          pt.y = pos_pts(1, i);
-          pt.z = odom_pos_(2);
-          bspline.pos_pts.push_back(pt);
+        geometry_msgs::Point pt;
+        pt.x = pos_pts(0, i);
+        pt.y = pos_pts(1, i);
+        pt.z = odom_pos_(2);
+        bspline.pos_pts.push_back(pt);
       }
 
       Eigen::VectorXd knots = info->position_traj_.getKnot();
       bspline.knots.reserve(knots.rows());
       for (int i = 0; i < knots.rows(); ++i)
       {
-          bspline.knots.push_back(knots(i));
+        bspline.knots.push_back(knots(i));
       }
-    }
 
-    // 根据轨迹类型选择发布方式
-    if (planner_manager_->pp_.use_minco_ && info->use_minco_traj_)
-    {
-      // MINCO 模式：只发布 MINCO 轨迹消息，不发布 B 样条近似
-      // 这样可以避免 traj_server 中的模式切换混乱
-      publishMincoTraj();
-    }
-    else
-    {
-      // B 样条模式：发布 B 样条消息
       bspline_pub_.publish(bspline);
     }
   }
@@ -1098,6 +1129,15 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
   void EGOReplanFSM::publishMincoTraj()
   {
     auto info = &planner_manager_->local_data_;
+    
+    // 检查轨迹是否有效
+    int piece_num = info->minco_traj_.getPieceNum();
+    
+    if (piece_num <= 0)
+    {
+      ROS_WARN("[FSM] publishMincoTraj: empty trajectory (piece_num=%d), skip publishing", piece_num);
+      return;
+    }
     
     ego_planner::MINCOTraj minco_msg;
     minco_msg.header.stamp = ros::Time::now();
@@ -1107,7 +1147,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     minco_msg.start_time = info->start_time_;
     
     // 获取轨迹的 piece 数量和持续时间
-    int piece_num = info->minco_traj_.getPieceNum();
     Eigen::VectorXd durations = info->minco_traj_.getDurations();
     
     minco_msg.duration.reserve(piece_num);
@@ -1133,6 +1172,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     }
     
     minco_pub_.publish(minco_msg);
+    ROS_INFO_THROTTLE(2.0, "[FSM] Published MINCO traj: %d pieces, duration=%.2fs", piece_num, durations.sum());
   }
 
 } // namespace ego_planner

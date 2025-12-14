@@ -1173,6 +1173,16 @@ namespace ego_planner
     // Force 2D optimization: clear all Z gradients
     gradP.row(2).setZero();
 
+    if (opt->iter_num_ % 10 == 0 || VERBOSE_OUTPUT) {
+    printf("[DEBUG] Iter: %d | Total: %.2f | Smooth: %.2f | Obs: %.2f | Feas: %.2f | Dist: %.2f | Time: %.2f\n",
+            opt->iter_num_,
+            smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost,
+            smoo_cost,
+            obs_swarm_feas_qvar_costs(0), // Obstacle
+            obs_swarm_feas_qvar_costs(2), // Feasibility (V+A+J+W+K)
+            obs_swarm_feas_qvar_costs(3), // SqrVariance
+            time_cost);
+  }
     return smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost;
   }
 
@@ -1242,13 +1252,15 @@ namespace ego_planner
     //
     int N = gdT.size();
     Eigen::Vector3d pos, vel, acc, jer, sna;
+    double vel_x , vel_y , acc_x , acc_y  , angVel , curv;
     Eigen::Vector3d gradp, gradv, grada, gradj;
-    double costp, costv, costa, costj;
+    Eigen::Vector3d gradwl_v, gradwl_a, gradkl_v, gradkl_a;
+    double costp, costv, costa, costj, costw, costk;
     Eigen::Matrix<double, 6, 1> beta0, beta1, beta2, beta3, beta4;
     double s1, s2, s3, s4, s5;
     double step, alpha;
-    Eigen::Matrix<double, 6, 3> gradViolaPc, gradViolaVc, gradViolaAc, gradViolaJc;
-    double gradViolaPt, gradViolaVt, gradViolaAt, gradViolaJt;
+    Eigen::Matrix<double, 6, 3> gradViolaPc, gradViolaVc, gradViolaAc, gradViolaJc, gradViolaWc, gradViolaKc;
+    double gradViolaPt, gradViolaVt, gradViolaAt, gradViolaJt, gradViolaWt, gradViolaKt;
     double omg;
     int i_dp = 0;
     costs.setZero();
@@ -1283,6 +1295,23 @@ namespace ego_planner
         acc = c.transpose() * beta2;
         jer = c.transpose() * beta3;
         sna = c.transpose() * beta4;
+        
+        vel_x = vel(0);
+        vel_y = vel(1);
+        acc_x = acc(0);
+        acc_y = acc(1);
+        double v2 = vel.squaredNorm();
+        // 速度太小时(< 0.4m/s)，直接认为角速度和曲率为0（不产生惩罚）
+        // 提高阈值避免低速时数值不稳定导致的梯度爆炸
+        if (v2 < 0.16) {  // 0.4m/s^2 阈值
+            angVel = 0.0;
+            curv = 0.0; 
+        } else {
+            // 安全的计算
+            angVel = (vel_x * acc_y - vel_y * acc_x) / v2;
+            curv = (vel_x * acc_y - vel_y * acc_x) / (v2 * vel.norm());
+        }
+   
 
         omg = (j == 0 || j == K) ? 0.5 : 1.0;
 
@@ -1317,16 +1346,31 @@ namespace ego_planner
           costs(2) += omg * step * costa;
         }
 
-        if (feasibilityGradCostJ(jer, gradj, costj))
-        {
-          gradViolaJc = beta3 * gradj.transpose();
-          gradViolaJt = alpha * gradj.transpose() * sna;
-          jerkOpt_.get_gdC().block<6, 3>(i * 6, 0) += omg * step * gradViolaJc;
-          gdT(i) += omg * (costj / K + step * gradViolaJt);
-          costs(2) += omg * step * costj;
+        // if (feasibilityGradCostJ(jer, gradj, costj))
+        // {
+        //   gradViolaJc = beta3 * gradj.transpose();
+        //   gradViolaJt = alpha * gradj.transpose() * sna;
+        //   jerkOpt_.get_gdC().block<6, 3>(i * 6, 0) += omg * step * gradViolaJc;
+        //   gdT(i) += omg * (costj / K + step * gradViolaJt);
+        //   costs(2) += omg * step * costj;
+        // }
+
+        if (feasibilityGradCostW(angVel, gradwl_v, gradwl_a, costw, vel, acc)) {
+          gradViolaWc = beta1 * gradwl_v.transpose() + beta2 * gradwl_a.transpose();
+          gradViolaWt = alpha * (gradwl_v.dot(acc) +  gradwl_a.dot(jer));
+          jerkOpt_.get_gdC().block<6, 3>(i * 6, 0) += omg * step * gradViolaWc;
+          gdT(i) += omg * (costw / K + step * gradViolaWt);
+          costs(2) += omg * step * costw;
         }
 
-        // printf("L\n");
+        if(feasibilityGradCostK(curv, gradkl_v, gradkl_a, costk, vel, acc )){
+          gradViolaKc = beta1 * gradkl_v.transpose() + beta2 * gradkl_a.transpose();
+          gradViolaKt = alpha * (gradkl_v.dot(acc) + gradkl_a.dot(jer));
+          jerkOpt_.get_gdC().block<6,3>(i * 6 , 0) += omg * step * gradViolaKc;
+          gdT(i) += omg * (costk / K + step * gradViolaKt);
+          costs(2) += omg * step * costk;
+        }
+       
 
         s1 += step;
         if (j != K || (j == K && i == N - 1))
@@ -1477,6 +1521,76 @@ namespace ego_planner
     return false;
   }
 
+  bool PolyTrajOptimizer::feasibilityGradCostW( const double angVel, 
+                                                Eigen::Vector3d &gradwl_v,   
+                                                Eigen::Vector3d &gradwl_a, 
+                                                double &costw,
+                                                const Eigen::Vector3d &vel,
+                                                const Eigen::Vector3d &acc)
+  {
+    double wpen = angVel * angVel - max_angVel_ * max_angVel_;
+    double v2 = vel.squaredNorm();
+    // 提高速度阈值避免低速时数值不稳定
+    if (wpen > 0 && v2 > 0.16) {  // 0.4m/s 阈值
+          // Eigen::Matrix3d B ;
+          // B << 0, -1, 0,
+          //      1, 0, 0,
+          //      0, 0, 0;
+          // 把B * acc ,B * vel简化成向量
+          Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
+          Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
+          // 使用2次方梯度代替3次方，降低数值爆炸风险
+          double gw = 4 * wei_feas_ * angVel * wpen;
+          // 更激进的梯度裁剪
+          const double max_grad = 1e4;
+          if (std::abs(gw) > max_grad) gw = (gw > 0 ? max_grad : -max_grad);
+
+          gradwl_v = gw * ((-B_acc - 2 * angVel * vel) / v2);
+          gradwl_a = gw * (B_vel / v2);
+          // 使用2次方代价代替3次方
+          costw = wei_feas_ * wpen * wpen;
+          // 更严格的Cost裁剪
+          if (costw > 1e5) costw = 1e5;
+          ROS_WARN_THROTTLE(0.1, "W violation: w=%.3f (max=%.3f), cost=%.1f", 
+            angVel, max_angVel_, costw);
+          return true;
+    }
+    return false;
+  }
+
+  bool PolyTrajOptimizer::feasibilityGradCostK( const double curv, 
+                                                Eigen::Vector3d &gradkl_v,   
+                                                Eigen::Vector3d &gradkl_a, 
+                                                double &costk,
+                                                const Eigen::Vector3d &vel,
+                                                const Eigen::Vector3d &acc)
+  {
+    double kpen = curv * curv - max_curv_ * max_curv_;
+    double v2 = vel.squaredNorm();
+    // 提高速度阈值避免低速时数值不稳定
+    if (kpen > 0 && v2 > 0.16) {  // 0.4m/s 阈值
+          Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
+          Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
+          // 使用2次方梯度代替3次方
+          double gw = 4 * wei_feas_ * curv * kpen;
+          // 更激进的梯度裁剪
+          const double max_grad = 1e4;
+          if (std::abs(gw) > max_grad) gw = (gw > 0 ? max_grad : -max_grad);
+
+          gradkl_v = gw * (-B_acc / (v2 * vel.norm()) - (3 * curv * vel / v2));
+          gradkl_a = gw * (B_vel / (v2 * vel.norm()));
+          // 使用2次方代价代替3次方
+          costk = wei_feas_ * kpen * kpen;
+          // 更严格的Cost裁剪
+          if (costk > 1e5) costk = 1e5;
+          ROS_WARN_THROTTLE(0.1, "K violation: k=%.3f (max=%.3f), cost=%.1f", 
+            curv, max_curv_, costk);
+          return true;
+    }
+    return false;
+  }
+
+
   void PolyTrajOptimizer::distanceSqrVarianceWithGradCost2p(const Eigen::MatrixXd &ps,
                                                             Eigen::MatrixXd &gdp,
                                                             double &var)
@@ -1549,6 +1663,8 @@ namespace ego_planner
     nh.param("optimization/max_vel", max_vel_, -1.0);
     nh.param("optimization/max_acc", max_acc_, -1.0);
     nh.param("optimization/max_jer", max_jer_, -1.0);
+    nh.param("optimization/max_angVel", max_angVel_, -1.0);
+    nh.param("optimization/max_curv", max_curv_, -1.0);
   }
 
   void PolyTrajOptimizer::setEnvironment(const GridMap::Ptr &map)

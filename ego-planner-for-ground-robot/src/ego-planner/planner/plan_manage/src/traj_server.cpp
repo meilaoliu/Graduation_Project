@@ -104,6 +104,7 @@ void bsplineCallback(ego_planner::BsplineConstPtr msg)
 
 void mincoTrajCallback(ego_planner::MINCOTrajConstPtr msg)
 {
+  
   if (msg->order != 5)
   {
     ROS_ERROR("[traj_server] Only support trajectory order equals 5 now!");
@@ -111,7 +112,13 @@ void mincoTrajCallback(ego_planner::MINCOTrajConstPtr msg)
   }
   if (msg->duration.size() * (msg->order + 1) != msg->coef_x.size())
   {
-    ROS_ERROR("[traj_server] WRONG trajectory parameters!");
+    ROS_ERROR("[traj_server] WRONG trajectory parameters! duration_size=%zu, coef_x_size=%zu", 
+              msg->duration.size(), msg->coef_x.size());
+    return;
+  }
+  if (msg->duration.size() == 0)
+  {
+    ROS_WARN("[traj_server] Empty trajectory, skip!");
     return;
   }
 
@@ -138,10 +145,10 @@ void mincoTrajCallback(ego_planner::MINCOTrajConstPtr msg)
   traj_duration_ = minco_traj_->getTotalDuration();
   traj_id_ = msg->traj_id;
 
-  use_minco_traj_ = true; // MINCO 模式
+  use_minco_traj_ = true;
   receive_traj_ = true;
   
-  ROS_INFO("[traj_server] Received MINCO trajectory with %d pieces, duration=%.2f", piece_nums, traj_duration_);
+  ROS_INFO_THROTTLE(2.0, "[traj_server] MINCO traj: %d pieces, duration=%.2fs", piece_nums, traj_duration_);
 }
 
 void poseCallback(geometry_msgs::PoseStampedConstPtr msg)
@@ -389,24 +396,11 @@ void MPC_calculate(double &t_cur)
         cmd.angular.z = u_k.col(0)(1);
        static int conut1 = 0;
        conut1+=1;
-       if(conut1%20==0)
+       // 降低调试输出频率，每200次输出一次关键信息
+       if(conut1%200==0)
        {
-           ROS_WARN("U r :");
-           for(int i=0;i<U_r.size();i++)
-           {
-               cout<<"vel ref :"<<U_r[i](0)<<","<<"w ref : "<<U_r[i](1);
-               cout<<endl;
-           }
-           cout<<endl;
-           ROS_WARN("U k :");
-           for(int i=0;i<u_k.cols();i++)
-           {
-               cout<<"vel optimal :"<<u_k.col(i)(0)<<","<<"w optimal : "<<u_k.col(i)(1);
-               cout<<endl;
-           }
-           cout<<endl;
-           cout<<"current vel : : "<<u_k.col(0)(0) <<"m/s"<<endl;
-           cout<<"current w : "<<u_k.col(0)(1)<<"rad/s"<<endl;
+           ROS_INFO("[MPC] cmd: v=%.2fm/s, w=%.2frad/s | ref: v=%.2f, w=%.2f", 
+                    u_k.col(0)(0), u_k.col(0)(1), U_r[0](0), U_r[0](1));
            conut1=0;
        }
 
@@ -478,6 +472,15 @@ void cmdCallback(const ros::TimerEvent &e)
         cmd.angular.z = 0;
         cmd.linear.x = 0;
         vel_cmd_pub.publish(cmd);
+        return;
+    }
+
+    // 当 FSM 处于 ADJUST_POSE 状态时，停止轨迹跟踪
+    // FSM 会直接控制车辆转向，traj_server 不应该发送任何控制命令
+    // 否则两者会冲突导致车辆抖动
+    if (is_adjust_pose.data == 1)
+    {
+        // 不发送任何命令，让 FSM 完全控制
         return;
     }
 

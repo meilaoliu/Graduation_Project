@@ -97,8 +97,8 @@ namespace ego_planner
     double wei_feas_;                                             // feasibility weight
     double wei_sqrvar_;                                           // squared variance weight
     double wei_time_;                                             // time weight
-    double obs_clearance_, obs_clearance_soft_; // safe distance
-    double max_vel_, max_acc_, max_jer_;                          // dynamic limits
+    double obs_clearance_, obs_clearance_soft_;  // safe distance
+    double max_vel_, max_acc_, max_jer_, max_angVel_, max_curv_;                          // dynamic limits
 
     double t_now_;
 
@@ -191,6 +191,20 @@ namespace ego_planner
     bool feasibilityGradCostJ(const Eigen::Vector3d &j,
                               Eigen::Vector3d &gradj,
                               double &costj);
+    
+    bool feasibilityGradCostW( const double angVel, 
+                                Eigen::Vector3d &gradwl_v,   
+                                Eigen::Vector3d &gradwl_a, 
+                                double &costw,
+                                const Eigen::Vector3d &vel,
+                                const Eigen::Vector3d &acc);
+
+  bool feasibilityGradCostK( const double curv, 
+                            Eigen::Vector3d &gradkl_v,   
+                            Eigen::Vector3d &gradkl_a, 
+                            double &costk,
+                            const Eigen::Vector3d &vel,
+                            const Eigen::Vector3d &acc);
 
     void distanceSqrVarianceWithGradCost2p(const Eigen::MatrixXd &ps,
                                            Eigen::MatrixXd &gdp,

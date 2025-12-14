@@ -17,3 +17,6 @@ gazebo.png
 vlm_arm/
 substation_dae/materials/textures/
 main_ws/
+*.log
+.catkin_tools
+*.md

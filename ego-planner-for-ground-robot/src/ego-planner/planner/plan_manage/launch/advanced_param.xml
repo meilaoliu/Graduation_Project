@@ -16,9 +16,12 @@
 
   <arg name="max_vel"/>
   <arg name="max_acc"/>
+  <arg name="max_jer"/>
+  <!-- maximum angular velocity, curvature and angular velocity -->
   <arg name="max_w"/>
   <arg name="max_k"/>
-  
+
+
   <arg name="planning_horizon"/>
 
   <arg name="point_num"/>
@@ -139,7 +142,7 @@
     <param name="manager/control_points_distance" value="0.6" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
-    <param name="manager/use_multitopology_trajs" value="true" type="bool"/>
+    <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
@@ -149,6 +152,7 @@
     <param name="optimization/dist0" value="1.0" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
+    <param name="optimization/max_jerk" value="$(arg max_jer)" type="double"/>
     <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
     <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
     
@@ -158,17 +162,19 @@
 
     <!-- MINCO optimization parameters -->
     <param name="optimization/constraint_points_perPiece" value="8" type="int"/>
-    <param name="optimization/weight_obstacle" value="5000.0" type="double"/>
-    <param name="optimization/weight_obstacle_soft" value="500.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="5000.0" type="double"/>
+    <param name="optimization/weight_obstacle" value="1500.0" type="double"/>
+    <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="1000.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="1000.0" type="double"/>
-    <param name="optimization/weight_time" value="500.0" type="double"/>
+    <param name="optimization/weight_time" value="220.0" type="double"/>
     <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
     <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
-    <param name="optimization/max_jer" value="10.0" type="double"/>
-
+    <param name="optimization/max_angVel" value="$(arg max_w)" type="double"/>
+    <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
+    
     <param name="MPC/v_max" value="1.8" type="double"/>
     <param name="MPC/w_max" value="1.2" type="double"/>
+    <!-- <param name="MPC/w_max" value="$(arg max_w)" type="double"/> -->
     <param name="MPC/omega0" value="1.0" type="double"/>
     <param name="MPC/omega1" value="0.1" type="double"/>
 

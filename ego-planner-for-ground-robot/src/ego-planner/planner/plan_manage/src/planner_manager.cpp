@@ -23,6 +23,9 @@ namespace ego_planner
         nh.param("manager/planning_horizon", pp_.planning_horizen_, 5.0);
         nh.param("manager/use_minco", use_minco_, false);
         nh.param("manager/use_multitopology_trajs", pp_.use_multitopology_trajs_, false);
+        
+        // 将 use_minco_ 同步到 pp_.use_minco_，确保外部代码能正确访问
+        pp_.use_minco_ = use_minco_;
 
         local_data_.traj_id_ = 0;
         grid_map_.reset(new GridMap);
@@ -673,39 +676,24 @@ namespace ego_planner
             int piece_nums;
             constexpr double init_of_init_totaldur = 2.0;
             
-            // 方案C: 优化起点速度方向，避免大角度差异导致掉头
-            // 如果速度很小，不要过度依赖当前速度方向
+            // 优化起点速度方向：仅在速度很小时调整
+            // 速度不为零时保持原始速度，让FSM的ADJUST_POSE处理掉头
             Eigen::Vector3d adjusted_start_vel = start_vel;
             
             if (start_vel.norm() < 0.1)
             {
-                // 速度很小时，直接指向目标
-                double vel_norm = 0.1; 
+                // 速度很小时（接近静止），给一个指向目标的微小初速度
+                // 这样优化器生成的轨迹方向会更合理
+                double vel_norm = 0.05; // 给一个小值作为方向提示
                 double target_direction = atan2((local_target_pt - start_pt)(1), (local_target_pt - start_pt)(0));
                 adjusted_start_vel(0) = vel_norm * cos(target_direction);
                 adjusted_start_vel(1) = vel_norm * sin(target_direction);
                 adjusted_start_vel(2) = 0;
+                ROS_DEBUG("Near-zero velocity: setting initial direction toward target");
             }
-            else
-            {
-                double current_yaw = atan2(start_vel(1), start_vel(0));
-                double target_direction = atan2((local_target_pt - start_pt)(1), (local_target_pt - start_pt)(0));
-                double yaw_diff = target_direction - current_yaw;
-                
-                // 归一化角度差到 [-PI, PI]
-                while (yaw_diff > M_PI) yaw_diff -= 2 * M_PI;
-                while (yaw_diff < -M_PI) yaw_diff += 2 * M_PI;
-                
-                // 如果方向差异太大（>60度），调整起点速度方向
-                if (abs(yaw_diff) > M_PI / 3.0)
-                {
-                    double vel_norm = std::max(start_vel.norm(), 0.1); 
-                    adjusted_start_vel(0) = vel_norm * cos(target_direction);
-                    adjusted_start_vel(1) = vel_norm * sin(target_direction);
-                    adjusted_start_vel(2) = 0;
-                    ROS_INFO("Adjusted start velocity direction: yaw_diff=%.1f deg", yaw_diff * 180 / M_PI);
-                }
-            }
+            // 移除了高速时强制调整速度方向的逻辑
+            // 让FSM的ADJUST_POSE状态处理需要掉头的情况
+
             
             headState << start_pt, adjusted_start_vel, start_acc;
             tailState << local_target_pt, local_target_vel, Eigen::Vector3d::Zero();
@@ -834,38 +822,14 @@ namespace ego_planner
         
         // 存储 MINCO 轨迹
         local_data_.minco_traj_ = traj;
-        local_data_.use_minco_traj_ = true; // 标记使用 MINCO 轨迹
-        // 注意：start_time_ 由 FSM 在外部设置，这里不设置
+        local_data_.use_minco_traj_ = true;
         local_data_.duration_ = traj.getTotalDuration();
         local_data_.traj_id_++;
         local_data_.start_pos_ = traj.getJuncPos(0);
         
-        // 为了兼容性和发布，生成高精度 B 样条近似
-        // 使用更密集的采样以提高精度
-        double dt = pp_.ctrl_pt_dist / pp_.max_vel_ * 0.5; // 使用更小的时间步长
-        int sample_num = std::max(10, (int)(local_data_.duration_ / dt));
-        dt = local_data_.duration_ / sample_num;
-        
-        vector<Eigen::Vector3d> point_set;
-        for (int i = 0; i <= sample_num; ++i)
-        {
-            double t = std::min(i * dt, local_data_.duration_);
-            point_set.push_back(traj.getPos(t));
-        }
-        
-        vector<Eigen::Vector3d> start_end_derivatives;
-        start_end_derivatives.push_back(traj.getVel(0.0));
-        start_end_derivatives.push_back(traj.getVel(local_data_.duration_));
-        start_end_derivatives.push_back(traj.getAcc(0.0));
-        start_end_derivatives.push_back(traj.getAcc(local_data_.duration_));
-        
-        Eigen::MatrixXd ctrl_pts;
-        UniformBspline::parameterizeToBspline(dt, point_set, start_end_derivatives, ctrl_pts);
-        
-        // B 样条仅用于发布，实际评估使用 MINCO
-        local_data_.position_traj_ = UniformBspline(ctrl_pts, 3, dt);
-        local_data_.velocity_traj_ = local_data_.position_traj_.getDerivative();
-        local_data_.acceleration_traj_ = local_data_.velocity_traj_.getDerivative();
+        // MINCO 模式不需要 B 样条，直接使用 MINCO 轨迹
+        // traj_server 通过 /planning/minco_traj 消息获取轨迹
+        // 注意：position_traj_ 不再被初始化，所有访问点都需要检查 use_minco_traj_
         
         return true;
     }
