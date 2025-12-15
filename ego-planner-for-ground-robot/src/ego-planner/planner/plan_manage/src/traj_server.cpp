@@ -547,18 +547,21 @@ int main(int argc, char **argv)
   t_step = 0.03;
   
   // 读取前进模式参数
-  // 优先从全局参数 /forward_only 读取，如果没有则从 /traj_server/forward_only 读取
-  if (!ros::param::get("/forward_only", forward_only_)) {
-      ros::param::param<bool>("/traj_server/forward_only", forward_only_, true);
+  // 参数在 ego_planner_node 节点内定义，所以路径是 /ego_planner_node/fsm/forward_only
+  // 按优先级尝试多个路径：
+  // 1. /ego_planner_node/fsm/forward_only (与 advanced_param.xml 定义一致)
+  // 2. /forward_only (FSM 设置的全局参数，用于兼容)
+  if (!ros::param::get("/ego_planner_node/fsm/forward_only", forward_only_)) {
+      if (!ros::param::get("/forward_only", forward_only_)) {
+          // 都没找到，使用默认值
+          forward_only_ = true;
+          ROS_WARN("[Traj server]: forward_only param not found, using default: true");
+      }
   }
   ROS_INFO("[Traj server]: forward_only = %s", forward_only_ ? "true (no reverse)" : "false (bidirectional)");
 
 
   ros::Timer cmd_timer = node.createTimer(ros::Duration(0.03), cmdCallback);
-
-//  nh.param("traj_server/time_forward", time_forward_, -1.0);
-//  last_yaw_ = 0.0;
-//  last_yaw_dot_ = 0.0;
 
   ros::Duration(1.0).sleep();
 

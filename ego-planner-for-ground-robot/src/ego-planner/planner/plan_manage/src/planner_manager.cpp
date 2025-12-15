@@ -291,13 +291,33 @@ namespace ego_planner
 
     bool EGOPlannerManager::EmergencyStop(Eigen::Vector3d stop_pos)
     {
+        if (use_minco_)
+        {
+            // 生成 MINCO 停止轨迹：一个静止在 stop_pos 的单段轨迹
+            Eigen::Matrix3d headState, tailState;
+            headState << stop_pos, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero();
+            tailState << stop_pos, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero();
+            
+            poly_traj::MinJerkOpt stopMJO;
+            stopMJO.reset(headState, tailState, 1);
+            Eigen::MatrixXd innerPs;  // 空的内部点
+            Eigen::VectorXd durations(1);
+            durations(0) = 1.0;  // 1秒停止轨迹
+            stopMJO.generate(innerPs, durations);
+            
+            setLocalTrajFromOpt(stopMJO, true);
+            local_data_.start_time_ = ros::Time::now();
+        }
+        else
+        {
+            // 原有 B样条逻辑
         Eigen::MatrixXd control_points(3, 6);
         for (int i = 0; i < 6; i++)
         {
             control_points.col(i) = stop_pos;
         }
-
         updateTrajInfo(UniformBspline(control_points, 3, 1.0), ros::Time::now());
+        }
 
         return true;
     }

@@ -107,8 +107,6 @@ namespace ego_planner
     /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
     void changeDirection();
-    void checkYawError();
-    double calculateYawError(double yaw_cur,double yaw_target);
     std::pair<int, EGOReplanFSM::FSM_EXEC_STATE> timesOfConsecutiveStateCalls();
     void printFSMExecState();
 

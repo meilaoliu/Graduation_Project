@@ -178,55 +178,12 @@ namespace ego_planner
 void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg)
 {
     end_pt_ << msg->pose.position.x, msg->pose.position.y, odom_pos_(2);
-
-    //cout << "Triggered!" << endl;
     trigger_ = true;
-
-    double error_x = msg->pose.position.x - odom_pos_(0);
-    double error_y = msg->pose.position.y - odom_pos_(1);
-
     init_pt_ = odom_pos_;
-
-    bool success = false;
-
-
     goal_last = end_pt_;
 
-//    last_state_ = exec_state_;
-//    yaw_start = atan2(error_y,error_x);
-//    yaw_error = yaw_start-yaw;
-//
-//    //first step : calculate the yaw error
-//    if(abs(yaw_error)>PI)
-//    {
-//        yaw_error = yaw_error - yaw_error/abs(yaw_error)*2*PI;
-//    }
-//    if(abs(yaw_error)>PI/2.0)
-//    {
-//        if(yaw>0)
-//        {
-//            yaw -= PI;
-//        }else if(yaw<0)
-//        {
-//            yaw += PI;
-//        }
-//        changeDirection();
-//        //yaw_error = - yaw_error/abs(yaw_error)*(PI-abs(yaw_error));
-//        yaw_error = yaw_start - yaw;
-//
-//    }
-//    if(abs(yaw_error)>yaw_error_max)
-//    {
-//        cmd_vel.twist.linear.x = 0;
-//        cmd_vel.twist.angular.z = yaw_error/abs(yaw_error)*w_adjust;
-//        bool success = false;
-//        end_pt_ << msg->point.x, msg->point.y, msg->point.z;
-//        success = planner_manager_->planGlobalTraj(odom_pos_,odom_vel_, Eigen::Vector3d::Zero(), end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
-//        changeFSMExecState(ADJUST_POSE, "TRIG");
-//        return;
-//    }
-
-    success = planner_manager_->planGlobalTraj(odom_pos_,odom_vel_, Eigen::Vector3d::Zero(), end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+    bool success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), 
+                                                     end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
     visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, 0);
 
@@ -244,9 +201,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         have_target_ = true;
         have_new_target_ = true;
 
-        //goal is too close to current pose
-
-        /*** FSM ***/
+        /*** FSM 状态转换 ***/
         if (exec_state_ == WAIT_TARGET)
         {
             changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
@@ -254,9 +209,10 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         }
         else if (exec_state_ == EXEC_TRAJ)
         {
-            // 检查新目标是否在车辆前方
-            // 计算当前速度方向（车头朝向）
-            double current_heading = yaw; // 使用当前航向角
+            // forward_only 模式下：检查新目标是否在车辆后方
+            if (forward_only_)
+            {
+                double current_heading = yaw;
             double target_dir = atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
             double angle_diff = target_dir - current_heading;
             // 归一化到 [-PI, PI]
@@ -266,25 +222,25 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             // 如果目标在后方（角度差 > 90度），强制停止并从静止重新规划
             if (abs(angle_diff) > PI / 2.0)
             {
-                ROS_WARN("New target is behind! Stopping and replanning from rest. angle_diff=%.1f deg", 
+                    ROS_WARN("[goal_callback] Target behind (%.1f deg), stop and replan from rest", 
                          abs(angle_diff) * 180.0 / PI);
-                // 发送停止命令
                 callEmergencyStop(odom_pos_);
-                // 进入 GEN_NEW_TRAJ 而不是 REPLAN_TRAJ，这样会从静止开始规划
                 changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
             }
             else
             {
-                // 目标在前方，正常重规划
+                    changeFSMExecState(REPLAN_TRAJ, "TRIG");
+                }
+            }
+            else
+            {
+                // 允许倒车模式：直接进入重规划，planFromCurrentTraj 会处理方向切换
             changeFSMExecState(REPLAN_TRAJ, "TRIG");
             }
             is_target_receive = true;
         }
 
         visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
-
-        // visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
-        //visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
     }
     else
     {
@@ -344,47 +300,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
-  }
-
-  void EGOReplanFSM::checkYawError() {
-      yaw_error = yaw_start-yaw;
-      //first step : find the real yaw error
-      if(abs(yaw_error)>yaw_error_max)
-      {
-          //if yaw error is larger than PI,it means the symbol between current yaw and target yaw is different
-          if(abs(yaw_error)>PI)
-          {
-              //calculate the real yaw error with symbol
-              yaw_error = yaw_error - yaw_error/abs(yaw_error)*2*PI;
-              //if real yaw error larger than PI/2, change the direction of robot
-              if(abs(yaw_error)>PI/2)
-              {
-                  // forward_only 模式下不改变方向，而是需要原地掉头
-                  if (!forward_only_) {
-                  changeDirection();
-                  }
-              }
-          }
-          else
-          {
-              cmd_vel.linear.x = 0;
-              cmd_vel.angular.z = yaw_error/abs(yaw_error)*w_adjust;
-
-          }
-      }
-  }
-
-  double EGOReplanFSM::calculateYawError(double yaw_cur,double yaw_target) {
-      double error = yaw_target - yaw_cur;
-      if(abs(error)>PI)
-      {
-          error = error - error/abs(error)*2*PI;
-          return error;
-      }
-      else
-      {
-          return error;
-      }
   }
 
   void EGOReplanFSM::changeDirection() {
@@ -518,16 +433,8 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     case GEN_NEW_TRAJ:
     {
       start_pt_ = odom_pos_;
-      
-      // 给一个指向目标的微小初速度，引导轨迹方向（特别是当目标在身后时）
-      // 这样生成的轨迹起始切线会指向目标，让 traj_server 正确检测到需要掉头
-      if (have_target_) {
-          double heading = atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
-          start_vel_ << 0.01 * cos(heading), 0.01 * sin(heading), 0;
-      } else {
-          start_vel_ << 0, 0, 0;
-      }
-      
+      // 初速度设为零，让 planner_manager 的 computeInitState 统一处理方向逻辑
+      start_vel_.setZero();
       start_acc_.setZero();
 
       // Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block(0, 0, 3, 1);
@@ -703,9 +610,11 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         }
         else
         {
-          // 轨迹结束但还没到目标，重规划
-          ROS_WARN("[FSM] Traj ended but not at goal (dist=%.2fm), replanning!", dist_to_goal_actual);
-          changeFSMExecState(REPLAN_TRAJ, "FSM");
+          // 轨迹结束但还没到目标
+          // 使用 GEN_NEW_TRAJ 而不是 REPLAN_TRAJ，因为当前轨迹已过期
+          // REPLAN_TRAJ 依赖有效的当前轨迹，而此时 t_to_lc_end < 0 会导致失败
+          ROS_WARN("[FSM] Traj ended but not at goal (dist=%.2fm), generating new trajectory!", dist_to_goal_actual);
+          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
           return;
         }
       }
@@ -728,6 +637,15 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     case EMERGENCY_STOP:
     {
+      // 持续发送停止命令，确保车辆可靠停止
+      std_msgs::UInt8 stop_cmd;
+      stop_cmd.data = 1;
+      stop_pub.publish(stop_cmd);
+      
+      // 同时直接发送零速度命令作为备份
+      cmd_vel.linear.x = 0;
+      cmd_vel.angular.z = 0;
+      cmd_pub_.publish(cmd_vel);
 
       if (flag_escape_emergency_) // Avoiding repeated calls
       {
@@ -736,7 +654,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       else
       {
         if (odom_vel_.norm() < 0.1)
+        {
+          // 恢复正常状态前，清除停止命令
+          stop_cmd.data = 0;
+          stop_pub.publish(stop_cmd);
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+        }
       }
 
       flag_escape_emergency_ = false;
@@ -769,137 +692,81 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
     }
 
-    // 验证初始状态的曲率和角速度
-    // 如果过高，强制降低速度以避免优化失败
-    double v_norm = start_vel_.head<2>().norm(); // 只考虑2D平面
-    if (v_norm > 0.1)
+    // 计算目标方向与当前航向的误差
+    yaw_start = atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
+    yaw_error = yaw_start - yaw;
+    if (abs(yaw_error) > PI)
     {
-      // 计算曲率: κ = |v × a| / |v|^3
-      Eigen::Vector3d cross = start_vel_.cross(start_acc_);
-      double curvature = cross.norm() / (v_norm * v_norm * v_norm);
-      
-      // 计算角速度: ω = κ * v
-      double angVel = curvature * v_norm;
-      
-      // 获取限制值（使用默认值，因为FSM不直接访问优化器参数）
-      double max_curv = 3.0;    // 这应与launch文件中的max_k一致
-      double max_w = 3.5;       // 这应与launch文件中的max_w一致
-      
-      // 如果曲率或角速度超出限制，按比例降低速度
-      bool need_adjust = false;
-      double scale_factor = 1.0;
-      
-      if (curvature > max_curv * 2.0)  // 如果超过2倍限制
-      {
-        need_adjust = true;
-        scale_factor = std::min(scale_factor, 0.3);  // 大幅降低速度
-        ROS_WARN("[FSM] High curvature=%.2f (max=%.2f), reducing velocity", curvature, max_curv);
+        yaw_error = yaw_error - yaw_error / abs(yaw_error) * 2 * PI;
       }
-      else if (curvature > max_curv)
-      {
-        need_adjust = true;
-        scale_factor = std::min(scale_factor, max_curv / curvature);
-      }
-      
-      if (angVel > max_w * 2.0)  // 如果超过2倍限制
-      {
-        need_adjust = true;
-        scale_factor = std::min(scale_factor, 0.3);
-        ROS_WARN("[FSM] High angular velocity=%.2f (max=%.2f), reducing velocity", angVel, max_w);
-      }
-      else if (angVel > max_w)
-      {
-        need_adjust = true;
-        scale_factor = std::min(scale_factor, max_w / angVel);
-      }
-      
-      if (need_adjust)
-      {
-        start_vel_ *= scale_factor;
-        start_acc_ *= scale_factor * scale_factor;  // 加速度缩放平方
-        ROS_INFO("[FSM] Adjusted initial state: vel_scale=%.2f", scale_factor);
-      }
-    }
 
-    // 强制检查速度方向与目标方向
-    double current_vel_dir = atan2(start_vel_(1), start_vel_(0));
-    double target_dir = atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
-    double dir_diff = target_dir - current_vel_dir;
-    while (dir_diff > PI) dir_diff -= 2 * PI;
-    while (dir_diff < -PI) dir_diff += 2 * PI;
-
-    // 如果速度方向相反（>90度）且速度不为0
-    // 解决绕圈问题：强制停车，不使用当前速度作为初始条件
-    if (abs(dir_diff) > PI / 2.0 && start_vel_.norm() > 0.1)
+    // forward_only 模式：检查是否需要掉头
+    if (forward_only_)
     {
-        ROS_WARN("Target is behind! Force stop to avoid circling.");
-        
-        // 1. 强制将起始速度设为 0（模拟急刹车）
-        start_vel_.setZero();
-        start_acc_.setZero();
-        
-        // 2. 触发掉头逻辑
-        yaw_start = target_dir;
-        yaw_error = yaw_start - yaw;
-        if (abs(yaw_error) > PI) yaw_error -= yaw_error / abs(yaw_error) * 2 * PI;
-        
-        if (abs(yaw_error) > yaw_error_max)
+        // 只在收到新目标时检查航向误差，行走过程中的重规划不触发掉头
+        // 这样可以避免弯道行驶时因轨迹方向变化而频繁停车
+        if (is_target_receive)
         {
-            cmd_vel.linear.x = 0;
-            cmd_vel.angular.z = yaw_error / abs(yaw_error) * w_adjust;
-            changeFSMExecState(ADJUST_POSE, "TRIG");
-            return false;
-        }
-    }
-
-    yaw_start = atan2((end_pt_-odom_pos_)(1),(end_pt_-odom_pos_)(0));
-    yaw_error = yaw_start-yaw;
-
-    if(is_target_receive)
-    {
-        if(abs(yaw_error)>PI)
-        {
-            yaw_error = yaw_error - yaw_error/abs(yaw_error)*2*PI;
-        }
-        
-        if (forward_only_)
-        {
-            // forward_only 模式：如果目标在身后，需要原地掉头
-            if(abs(yaw_error) > yaw_error_max)
+            // 如果航向误差过大，需要原地掉头
+            if (abs(yaw_error) > yaw_error_max)
             {
-                ROS_WARN("[FSM forward_only planFromCurrentTraj] Need to turn: error=%.1f deg", 
-                         yaw_error * 180.0 / PI);
+                ROS_WARN("[FSM forward_only] Need to turn: yaw=%.1f, traj=%.1f, error=%.1f deg", 
+                         yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_error * 180.0 / PI);
                 cmd_vel.linear.x = 0;
-                cmd_vel.angular.z = yaw_error/abs(yaw_error)*w_adjust;
+                cmd_vel.angular.z = yaw_error / abs(yaw_error) * w_adjust;
                 changeFSMExecState(ADJUST_POSE, "TRIG");
                 is_target_receive = false;
                 return false;
             }
         }
+        
+        // 行走过程中：只检查速度方向与目标方向的大角度偏差
+        // 用于处理轨迹规划出现大转弯导致需要掉头的情况
+        if (start_vel_.norm() > 0.3)
+        {
+            double current_vel_dir = atan2(start_vel_(1), start_vel_(0));
+            double dir_diff = yaw_start - current_vel_dir;
+            while (dir_diff > PI) dir_diff -= 2 * PI;
+            while (dir_diff < -PI) dir_diff += 2 * PI;
+
+            // 只有当速度方向与目标方向接近反向（>120度）时才停车
+            // 90度改为120度，减少正常弯道行驶时的误触发
+            if (abs(dir_diff) > 2.0 * PI / 3.0)
+            {
+                ROS_WARN("[FSM forward_only] Velocity direction wrong, force stop. dir_diff=%.1f deg", 
+                         dir_diff * 180.0 / PI);
+                start_vel_.setZero();
+                start_acc_.setZero();
+            }
+        }
+    }
         else
         {
-            // 原有逻辑：允许倒车
-        if(abs(yaw_error)>PI/2.0)
+        // 允许倒车模式：收到新目标时检查是否需要切换方向
+        if (is_target_receive)
         {
-            if(yaw>0)
+            if (abs(yaw_error) > PI / 2.0)
+            {
+                // 目标在后方，切换到倒车模式
+                if (yaw > 0)
             {
                 yaw -= PI;
-            }else if(yaw<0)
+                }
+                else if (yaw < 0)
             {
                 yaw += PI;
             }
             changeDirection();
             yaw_error = yaw_start - yaw;
-            start_vel_ <<-start_vel_(0),-start_vel_(1),0;
-            start_acc_ <<-start_acc_(0),-start_acc_(1),0;
+                start_vel_ << -start_vel_(0), -start_vel_(1), 0;
+                start_acc_ << -start_acc_(0), -start_acc_(1), 0;
             std_msgs::UInt8 stop_cmd;
             stop_cmd.data = 1;
             stop_pub.publish(stop_cmd);
             }
         }
-        is_target_receive = false;
     }
-    //first step : calculate the yaw error
+    is_target_receive = false;
 
 
     bool success = callReboundReplan(false, false);
@@ -1022,15 +889,45 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
   bool EGOReplanFSM::callEmergencyStop(Eigen::Vector3d stop_pos)
   {
-
     planner_manager_->EmergencyStop(stop_pos);
 
-    // 遵循 main_ws 设计：直接发布 MINCO 轨迹消息
     auto info = &planner_manager_->local_data_;
     info->start_time_ = ros::Time::now();
     
-    // 发布 MINCO 轨迹消息
+    // 根据轨迹类型选择发布方式
+    if (planner_manager_->pp_.use_minco_)
+    {
+        // MINCO 模式：发布 MINCO 轨迹消息
     publishMincoTraj();
+    }
+    else
+    {
+        // B样条模式：发布 B样条消息
+        ego_planner::Bspline bspline;
+        bspline.order = 3;
+        bspline.start_time = info->start_time_;
+        bspline.traj_id = info->traj_id_;
+
+        Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
+        bspline.pos_pts.reserve(pos_pts.cols());
+        for (int i = 0; i < pos_pts.cols(); ++i)
+        {
+            geometry_msgs::Point pt;
+            pt.x = pos_pts(0, i);
+            pt.y = pos_pts(1, i);
+            pt.z = pos_pts(2, i);
+            bspline.pos_pts.push_back(pt);
+        }
+
+        Eigen::VectorXd knots = info->position_traj_.getKnot();
+        bspline.knots.reserve(knots.rows());
+        for (int i = 0; i < knots.rows(); ++i)
+        {
+            bspline.knots.push_back(knots(i));
+        }
+
+        bspline_pub_.publish(bspline);
+    }
 
     return true;
   }
@@ -1041,6 +938,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;
     double dist_min = 9999, dist_min_t = 0.0;
+    
     for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_; t += t_step)
     {
       Eigen::Vector3d pos_t = planner_manager_->global_data_.getPosition(t);

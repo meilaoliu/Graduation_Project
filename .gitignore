@@ -16,7 +16,9 @@ rviz.png
 gazebo.png
 vlm_arm/
 substation_dae/materials/textures/
-main_ws/
+#main_ws/
+ego-planner-B-spline/
+ego-planner-minco/
 *.log
 .catkin_tools
 *.md
