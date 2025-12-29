@@ -1540,7 +1540,7 @@ namespace ego_planner
           Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
           Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
           // 使用2次方梯度代替3次方，降低数值爆炸风险
-          double gw = 4 * wei_feas_ * angVel * wpen;
+          double gw = 4 * wei_angVel_ * angVel * wpen;
           // 更激进的梯度裁剪
           const double max_grad = 1e4;
           if (std::abs(gw) > max_grad) gw = (gw > 0 ? max_grad : -max_grad);
@@ -1548,7 +1548,7 @@ namespace ego_planner
           gradwl_v = gw * ((-B_acc - 2 * angVel * vel) / v2);
           gradwl_a = gw * (B_vel / v2);
           // 使用2次方代价代替3次方
-          costw = wei_feas_ * wpen * wpen;
+          costw = wei_angVel_ * wpen * wpen;
           // 更严格的Cost裁剪
           if (costw > 1e5) costw = 1e5;
           ROS_WARN_THROTTLE(0.1, "W violation: w=%.3f (max=%.3f), cost=%.1f", 
@@ -1572,7 +1572,7 @@ namespace ego_planner
           Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
           Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
           // 使用2次方梯度代替3次方
-          double gw = 4 * wei_feas_ * curv * kpen;
+          double gw = 4 * wei_curv_ * curv * kpen;
           // 更激进的梯度裁剪
           const double max_grad = 1e4;
           if (std::abs(gw) > max_grad) gw = (gw > 0 ? max_grad : -max_grad);
@@ -1580,7 +1580,7 @@ namespace ego_planner
           gradkl_v = gw * (-B_acc / (v2 * vel.norm()) - (3 * curv * vel / v2));
           gradkl_a = gw * (B_vel / (v2 * vel.norm()));
           // 使用2次方代价代替3次方
-          costk = wei_feas_ * kpen * kpen;
+          costk = wei_curv_ * kpen * kpen;
           // 更严格的Cost裁剪
           if (costk > 1e5) costk = 1e5;
           ROS_WARN_THROTTLE(0.1, "K violation: k=%.3f (max=%.3f), cost=%.1f", 
@@ -1656,6 +1656,8 @@ namespace ego_planner
     nh.param("optimization/weight_obstacle", wei_obs_, -1.0);
     nh.param("optimization/weight_obstacle_soft", wei_obs_soft_, -1.0);
     nh.param("optimization/weight_feasibility", wei_feas_, -1.0);
+    nh.param("optimization/weight_angVel", wei_angVel_, wei_feas_);  // 默认fallback到wei_feas_
+    nh.param("optimization/weight_curv", wei_curv_, wei_feas_);      // 默认fallback到wei_feas_
     nh.param("optimization/weight_sqrvariance", wei_sqrvar_, -1.0);
     nh.param("optimization/weight_time", wei_time_, -1.0);
     nh.param("optimization/obstacle_clearance", obs_clearance_, -1.0);

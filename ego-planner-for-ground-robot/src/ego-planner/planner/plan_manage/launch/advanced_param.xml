@@ -144,7 +144,7 @@
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
-  <!-- trajectory optimization -->
+  <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
     <param name="optimization/lambda_collision" value="0.8" type="double"/>
     <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
@@ -165,6 +165,8 @@
     <param name="optimization/weight_obstacle" value="1200.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
     <param name="optimization/weight_feasibility" value="1000.0" type="double"/>
+    <param name="optimization/weight_angVel" value="50.0" type="double"/>
+    <param name="optimization/weight_curv" value="20.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="800.0" type="double"/>
     <param name="optimization/weight_time" value="220.0" type="double"/>
     <param name="optimization/obstacle_clearance" value="0.5" type="double"/>

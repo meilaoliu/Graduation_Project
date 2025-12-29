@@ -94,7 +94,9 @@ namespace ego_planner
 
     /* optimization parameters */
     double wei_obs_, wei_obs_soft_;                               // obstacle weight
-    double wei_feas_;                                             // feasibility weight
+    double wei_feas_;                                             // feasibility weight (for v, a, j)
+    double wei_angVel_;                                           // angular velocity weight
+    double wei_curv_;                                             // curvature weight
     double wei_sqrvar_;                                           // squared variance weight
     double wei_time_;                                             // time weight
     double obs_clearance_, obs_clearance_soft_;  // safe distance
