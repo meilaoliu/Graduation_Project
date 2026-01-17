@@ -161,18 +161,17 @@
     <param name="bspline/limit_ratio" value="1.1" type="double"/>
 
     <!-- MINCO optimization parameters -->
-    <param name="optimization/constraint_points_perPiece" value="8" type="int"/>
-    <param name="optimization/weight_obstacle" value="1200.0" type="double"/>
-    <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="1000.0" type="double"/>
-    <param name="optimization/weight_angVel" value="50.0" type="double"/>
-    <param name="optimization/weight_curv" value="20.0" type="double"/>
-    <param name="optimization/weight_sqrvariance" value="800.0" type="double"/>
-    <param name="optimization/weight_time" value="220.0" type="double"/>
+    <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
+    <param name="optimization/weight_obstacle" value="800.0" type="double"/>
+    <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
+    <param name="optimization/weight_curv" value="1000.0" type="double"/>
+    <param name="optimization/weight_sqrvariance" value="900.0" type="double"/>
+    <param name="optimization/weight_time" value="300.0" type="double"/>
     <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
     <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
-    <param name="optimization/max_angVel" value="$(arg max_w)" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
+    <param name="optimization/velocity_singularity_eps" value="0.01" type="double"/>
     
     <param name="MPC/v_max" value="1.8" type="double"/>
     <param name="MPC/w_max" value="1.2" type="double"/>

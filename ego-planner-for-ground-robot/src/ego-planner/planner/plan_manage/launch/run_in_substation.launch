@@ -37,6 +37,8 @@
     <!-- maximum velocity and acceleration the drone will reach -->
     <arg name="max_vel" value="1.5" />
     <arg name="max_acc" value="3" />
+    <arg name="max_jer" value="8.0" />
+    <!-- maximum angular velocity, curvature and angular velocity -->
     <arg name="max_w" value="1.5" />
     <arg name="max_k" value="1.5" />
 

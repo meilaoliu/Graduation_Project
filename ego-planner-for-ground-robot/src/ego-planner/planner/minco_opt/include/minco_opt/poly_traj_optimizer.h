@@ -94,13 +94,13 @@ namespace ego_planner
 
     /* optimization parameters */
     double wei_obs_, wei_obs_soft_;                               // obstacle weight
-    double wei_feas_;                                             // feasibility weight (for v, a, j)
-    double wei_angVel_;                                           // angular velocity weight
+    double wei_feas_;                                             // feasibility weight (for v, a)
     double wei_curv_;                                             // curvature weight
     double wei_sqrvar_;                                           // squared variance weight
     double wei_time_;                                             // time weight
     double obs_clearance_, obs_clearance_soft_;  // safe distance
-    double max_vel_, max_acc_, max_jer_, max_angVel_, max_curv_;                          // dynamic limits
+    double max_vel_, max_acc_, max_jer_, max_curv_;               // dynamic limits
+    double eps_;                                                  // velocity singularity epsilon to avoid division by zero
 
     double t_now_;
 
@@ -193,20 +193,16 @@ namespace ego_planner
     bool feasibilityGradCostJ(const Eigen::Vector3d &j,
                               Eigen::Vector3d &gradj,
                               double &costj);
-    
-    bool feasibilityGradCostW( const double angVel, 
-                                Eigen::Vector3d &gradwl_v,   
-                                Eigen::Vector3d &gradwl_a, 
-                                double &costw,
-                                const Eigen::Vector3d &vel,
-                                const Eigen::Vector3d &acc);
 
-  bool feasibilityGradCostK( const double curv, 
-                            Eigen::Vector3d &gradkl_v,   
-                            Eigen::Vector3d &gradkl_a, 
-                            double &costk,
-                            const Eigen::Vector3d &vel,
-                            const Eigen::Vector3d &acc);
+    // Curvature constraint with left-right separation (κ ≤ κ_max and κ ≥ -κ_max)
+    bool feasibilityGradCostK(const Eigen::Vector3d &vel,
+                              const Eigen::Vector3d &acc,
+                              Eigen::Vector3d &gradK_v,
+                              Eigen::Vector3d &gradK_a,
+                              double &costK);
+
+    // Smoothed L1 penalty function for better optimization convergence
+    void positiveSmoothedL1(const double &x, double &f, double &df);
 
     void distanceSqrVarianceWithGradCost2p(const Eigen::MatrixXd &ps,
                                            Eigen::MatrixXd &gdp,

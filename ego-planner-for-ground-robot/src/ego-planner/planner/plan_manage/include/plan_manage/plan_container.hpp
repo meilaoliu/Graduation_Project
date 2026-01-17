@@ -14,6 +14,9 @@ using std::vector;
 namespace ego_planner
 {
 
+  // 预计算的碰撞检测点缓存类型：外层按 piece/segment 分组，内层是 (time, position) 对
+  typedef std::vector<std::vector<std::pair<double, Eigen::Vector3d>>> PtsChk_t;
+
   class GlobalTrajData
   {
   private:
@@ -34,7 +37,7 @@ namespace ego_planner
     double glb_t_of_lc_tgt_;
     double last_glb_t_of_lc_tgt_;
 
-    GlobalTrajData(/* args */) {}
+    GlobalTrajData(/* args */) : glb_t_of_lc_tgt_(0.0), last_glb_t_of_lc_tgt_(-1.0) {}
 
     ~GlobalTrajData() {}
 
@@ -53,6 +56,10 @@ namespace ego_planner
       time_increase_ = 0.0;
       last_time_inc_ = 0.0;
       last_progress_time_ = 0.0;
+      
+      // MINCO specific: 初始化局部目标时间戳
+      glb_t_of_lc_tgt_ = time.toSec();
+      last_glb_t_of_lc_tgt_ = -1.0;
     }
 
     void setLocalTraj(UniformBspline traj, double local_ts, double local_te, double time_inc)
@@ -277,6 +284,7 @@ namespace ego_planner
     UniformBspline position_traj_, velocity_traj_, acceleration_traj_;
     poly_traj::Trajectory minco_traj_;
     bool use_minco_traj_ = false; // 标志位：是否使用 MINCO 轨迹
+    PtsChk_t pts_chk_;            // 预计算的碰撞检测点缓存，用于高效安全检测
   };
 
 } // namespace ego_planner

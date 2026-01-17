@@ -797,54 +797,139 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     // - WAIT_TARGET: 等待目标
     // - ADJUST_POSE: 正在原地掉头，轨迹还未开始执行
     // - INIT: 初始化
+    // - traj_id_ <= 0: 轨迹未初始化
     // - start_time_ 未设置
     if (exec_state_ == WAIT_TARGET || exec_state_ == ADJUST_POSE || 
-        exec_state_ == INIT || info->start_time_.toSec() < 1e-5)
+        exec_state_ == INIT || info->traj_id_ <= 0 || info->start_time_.toSec() < 1e-5)
       return;
 
-    /* ---------- check trajectory ---------- */
-    constexpr double time_step = 0.01;
-    double t_cur = (ros::Time::now() - info->start_time_).toSec();
-    double t_2_3 = info->duration_ * 2 / 3;
-    for (double t = t_cur; t < info->duration_; t += time_step)
-    {
-      if (t_cur < t_2_3 && t >= t_2_3) // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
-        break;
+    /* ---------- 使用预缓存点进行碰撞检测 ---------- */
+    const double t_cur = (ros::Time::now() - info->start_time_).toSec();
+    const PtsChk_t &pts_chk = info->pts_chk_;
 
-      Eigen::Vector3d pos_cur;
-      if (info->use_minco_traj_)
+    // MINCO 模式：使用预缓存点进行高效检测
+    if (info->use_minco_traj_ && pts_chk.size() > 0)
+    {
+      // 定位当前时间所在的 piece/segment
+      double t_temp = t_cur;
+      int i_start = info->minco_traj_.locatePieceIdx(t_temp);
+      
+      if (i_start >= (int)pts_chk.size())
+        return;  // 当前时间已超出预检测范围
+      
+      // 找到第一个 t > t_cur 的检测点
+      size_t j_start = 0;
+      for (; i_start < (int)pts_chk.size(); ++i_start)
       {
-        // 使用 MINCO 轨迹精确评估
-        pos_cur = info->minco_traj_.getPos(t);
-      }
-      else
-      {
-        pos_cur = info->position_traj_.evaluateDeBoorT(t);
-      }
-      Eigen::Vector2d pos_cur2d;
-      pos_cur2d << pos_cur(0),pos_cur(1);
-      if (map->getInflateOccupancy2d(pos_cur2d))
-      {
-        if (planFromCurrentTraj()) // Make a chance
+        for (j_start = 0; j_start < pts_chk[i_start].size(); ++j_start)
         {
-          changeFSMExecState(EXEC_TRAJ, "SAFETY");
-          return;
+          if (pts_chk[i_start][j_start].first > t_cur)
+            goto find_ij_start;
+        }
+      }
+    find_ij_start:;
+      
+      // 确定检测范围：只检测前 2/3 或全部（如果接近目标）
+      const bool touch_the_end = ((local_target_pt_ - end_pt_).norm() < 1e-2);
+      size_t i_end = touch_the_end ? pts_chk.size() : pts_chk.size() * 3 / 4;
+      
+      // 遍历预缓存的检测点
+      for (size_t i = i_start; i < i_end; ++i)
+      {
+        for (size_t j = (i == (size_t)i_start ? j_start : 0); j < pts_chk[i].size(); ++j)
+        {
+          double t = pts_chk[i][j].first;
+          Eigen::Vector3d p = pts_chk[i][j].second;
+          
+          // 2D 碰撞检测（地面机器人）
+          Eigen::Vector2d p2d;
+          p2d << p(0), p(1);
+          
+          if (map->getInflateOccupancy2d(p2d))
+          {
+            /* 检测到碰撞，尝试重规划 */
+            if (planFromCurrentTraj())
+            {
+              // 重规划成功：立即发布新轨迹，重置时间
+              ROS_INFO("[SAFETY] Replan success when collision detected at t=%.2f/%.2f", t, info->duration_);
+              info->start_time_ = ros::Time::now();
+              publishBspline();  // 立即发布新轨迹
+              
+              // 可视化更新
+              if (planner_manager_->pp_.use_minco_ && info->use_minco_traj_)
+              {
+                visualization_->displayMincoTraj(info->minco_traj_, 0.05, 0);
+              }
+              
+              changeFSMExecState(EXEC_TRAJ, "SAFETY");
+              return;
+            }
+            else
+            {
+              // 重规划失败
+              if (t - t_cur < emergency_time_)
+              {
+                ROS_WARN("[SAFETY] Emergency stop! Collision in %.2fs", t - t_cur);
+                changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+              }
+              else
+              {
+                ROS_WARN("[SAFETY] Collision at t=%.2f, replan later", t);
+                changeFSMExecState(REPLAN_TRAJ, "SAFETY");
+              }
+              return;
+            }
+          }
+        }
+      }
+    }
+    else
+    {
+      // B 样条模式或 pts_chk 为空：使用固定步长在线采样（兼容旧逻辑）
+      constexpr double time_step = 0.01;
+      double t_2_3 = info->duration_ * 2 / 3;
+      for (double t = t_cur; t < info->duration_; t += time_step)
+      {
+        if (t_cur < t_2_3 && t >= t_2_3)
+          break;
+
+        Eigen::Vector3d pos_cur;
+        if (info->use_minco_traj_)
+        {
+          pos_cur = info->minco_traj_.getPos(t);
         }
         else
         {
-          if (t - t_cur < emergency_time_) // 0.8s of emergency time
+          pos_cur = info->position_traj_.evaluateDeBoorT(t);
+        }
+        
+        Eigen::Vector2d pos_cur2d;
+        pos_cur2d << pos_cur(0), pos_cur(1);
+        
+        if (map->getInflateOccupancy2d(pos_cur2d))
+        {
+          if (planFromCurrentTraj())
           {
-            ROS_WARN("Suddenly discovered obstacles. emergency stop! time=%f", t - t_cur);
-            changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+            // 重规划成功：立即发布新轨迹，重置时间
+            info->start_time_ = ros::Time::now();
+            publishBspline();
+            changeFSMExecState(EXEC_TRAJ, "SAFETY");
+            return;
           }
           else
           {
-            //ROS_WARN("current traj in collision, replan.");
-            changeFSMExecState(REPLAN_TRAJ, "SAFETY");
+            if (t - t_cur < emergency_time_)
+            {
+              ROS_WARN("Suddenly discovered obstacles. emergency stop! time=%f", t - t_cur);
+              changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+            }
+            else
+            {
+              changeFSMExecState(REPLAN_TRAJ, "SAFETY");
+            }
+            return;
           }
-          return;
         }
-        break;
       }
     }
   }
@@ -939,6 +1024,9 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;
     double dist_min = 9999, dist_min_t = 0.0;
     
+    // 保存上一次的局部目标时间戳（用于 MINCO 初始化）
+    planner_manager_->global_data_.last_glb_t_of_lc_tgt_ = planner_manager_->global_data_.glb_t_of_lc_tgt_;
+    
     for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_; t += t_step)
     {
       Eigen::Vector3d pos_t = planner_manager_->global_data_.getPosition(t);
@@ -963,12 +1051,16 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       {
         local_target_pt_ = pos_t;
         planner_manager_->global_data_.last_progress_time_ = dist_min_t;
+        // 更新当前局部目标时间戳（用于 MINCO 初始化）
+        planner_manager_->global_data_.glb_t_of_lc_tgt_ = t;
         break;
       }
     }
     if (t > planner_manager_->global_data_.global_duration_) // Last global point
     {
       local_target_pt_ = end_pt_;
+      // 更新为全局轨迹终点时间
+      planner_manager_->global_data_.glb_t_of_lc_tgt_ = planner_manager_->global_data_.global_start_time_.toSec() + planner_manager_->global_data_.global_duration_;
     }
 
     if ((end_pt_ - local_target_pt_).norm() < (planner_manager_->pp_.max_vel_ * planner_manager_->pp_.max_vel_) / (2 * planner_manager_->pp_.max_acc_))

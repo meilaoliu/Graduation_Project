@@ -840,18 +840,29 @@ namespace ego_planner
     {
         poly_traj::Trajectory traj = opt.getTraj();
         
-        // 存储 MINCO 轨迹
-        local_data_.minco_traj_ = traj;
-        local_data_.use_minco_traj_ = true;
-        local_data_.duration_ = traj.getTotalDuration();
-        local_data_.traj_id_++;
-        local_data_.start_pos_ = traj.getJuncPos(0);
+        // 计算预检测点缓存，用于高效安全碰撞检测
+        Eigen::MatrixXd cps = opt.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+        PtsChk_t pts_to_check;
         
-        // MINCO 模式不需要 B 样条，直接使用 MINCO 轨迹
-        // traj_server 通过 /planning/minco_traj 消息获取轨迹
-        // 注意：position_traj_ 不再被初始化，所有访问点都需要检查 use_minco_traj_
+        int i_end = ConstraintPoints::two_thirds_id(cps, touch_goal);
+        bool ret = minco_optimizer_->computePointsToCheck(traj, i_end, pts_to_check);
         
-        return true;
+        if (ret && pts_to_check.size() >= 1 && pts_to_check.back().size() >= 1)
+        {
+            // 存储 MINCO 轨迹和预计算的检测点
+            local_data_.minco_traj_ = traj;
+            local_data_.pts_chk_ = pts_to_check;  // 存储预计算的碰撞检测点
+            local_data_.use_minco_traj_ = true;
+            local_data_.duration_ = traj.getTotalDuration();
+            local_data_.traj_id_++;
+            local_data_.start_pos_ = traj.getJuncPos(0);
+            local_data_.start_time_ = ros::Time::now();  // 设置轨迹开始时间
+            
+            return true;
+        }
+        
+        ROS_WARN("[PlannerManager] Failed to compute points to check for trajectory");
+        return false;
     }
 
 } // namespace ego_planner

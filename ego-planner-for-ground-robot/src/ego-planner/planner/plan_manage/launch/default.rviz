@@ -12,7 +12,7 @@ Panels:
         - /Map1
         - /Image1
       Splitter Ratio: 0.5
-    Tree Height: 1198
+    Tree Height: 408
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -73,7 +73,7 @@ Visualization Manager:
           Marker Topic: /ego_planner_node/goal_point
           Name: goal_point
           Namespaces:
-            {}
+            goal_point: true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -81,7 +81,7 @@ Visualization Manager:
           Marker Topic: /ego_planner_node/global_list
           Name: global_path
           Namespaces:
-            {}
+            "": true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -89,7 +89,7 @@ Visualization Manager:
           Marker Topic: /ego_planner_node/optimal_list
           Name: optimal_traj
           Namespaces:
-            {}
+            "": true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -218,8 +218,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 2.94234299659729
-        Min Value: 7.808208465576172e-06
+        Max Value: 7.875162601470947
+        Min Value: 0.06111490726470947
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -313,7 +313,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/ThirdPersonFollower
-      Distance: 60.69225311279297
+      Distance: 100.9313735961914
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
