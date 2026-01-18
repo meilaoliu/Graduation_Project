@@ -135,6 +135,7 @@
     <param name="grid_map/frame_id"      value="map"/>
 
   <!-- planner manager -->
+    <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
     <param name="manager/use_minco" value="true" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
@@ -142,6 +143,7 @@
     <param name="manager/control_points_distance" value="0.6" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
+    <!--是否开启拓扑同伦轨迹（会增加计算量）-->
     <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- Bspline trajectory optimization -->
@@ -164,10 +166,10 @@
     <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
     <param name="optimization/weight_obstacle" value="800.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
-    <param name="optimization/weight_curv" value="1000.0" type="double"/>
-    <param name="optimization/weight_sqrvariance" value="900.0" type="double"/>
-    <param name="optimization/weight_time" value="300.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="1200.0" type="double"/>
+    <param name="optimization/weight_curv" value="400.0" type="double"/>
+    <param name="optimization/weight_sqrvariance" value="800.0" type="double"/>
+    <param name="optimization/weight_time" value="500.0" type="double"/>
     <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
     <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
