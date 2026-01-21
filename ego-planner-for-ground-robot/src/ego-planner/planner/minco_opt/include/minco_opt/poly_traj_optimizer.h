@@ -201,8 +201,7 @@ namespace ego_planner
                               Eigen::Vector3d &gradK_a,
                               double &costK);
 
-    // Smoothed L1 penalty function for better optimization convergence
-    void positiveSmoothedL1(const double &x, double &f, double &df);
+
 
     void distanceSqrVarianceWithGradCost2p(const Eigen::MatrixXd &ps,
                                            Eigen::MatrixXd &gdp,

@@ -1483,92 +1483,61 @@ namespace ego_planner
     return false;
   }
 
-  // Curvature constraint with left-right separation and positiveSmoothedL1
-  // Uses eps_ to avoid singularity at low speeds
-  // IMPORTANT: Uses speed-dependent weight to prevent numerical explosion at low speeds
+  // Curvature constraint using Inequality Transformation
+  // Replaces the previous implementation to avoid singularity at v=0 and L-BFGS issues
   bool PolyTrajOptimizer::feasibilityGradCostK(const Eigen::Vector3d &vel,
                                                const Eigen::Vector3d &acc,
                                                Eigen::Vector3d &gradK_v,
                                                Eigen::Vector3d &gradK_a,
                                                double &costK)
   {
+    // Constraint: |(v x a) / v^3| < k_max
+    // Transformed: (v x a)^2 - k_max^2 * v^6 < 0
+    
     double v2 = vel.squaredNorm();
-    
-    // Speed-dependent weight: curvature constraint is meaningless at very low speeds
-    // (e.g., during in-place rotation, curvature is mathematically infinite)
-    // Using smooth ramp: weight = saturate(v² / v_thresh²)
-    const double v_thresh_sq = 0.25;  // 0.5 m/s threshold
-    double speed_weight = std::min(1.0, v2 / v_thresh_sq);
-    
-    // Skip curvature constraint entirely if speed is very low
-    if (speed_weight < 0.01)
+    double cross = vel(0) * acc(1) - vel(1) * acc(0); // 2D cross product for ground robot
+    double cross2 = cross * cross;
+
+    double k_lim_sqr = max_curv_ * max_curv_;
+    double v4 = v2 * v2;
+    double v6 = v4 * v2;
+
+    double limit = k_lim_sqr * v6;
+    // Penalty P = LHS - RHS. If P > 0, constraint is violated.
+    double penalty = cross2 - limit; 
+
+    if (penalty > 0)
     {
-      gradK_v.setZero();
-      gradK_a.setZero();
-      costK = 0.0;
-      return false;
+      // Cost = weight * P^3 (cubic penalty for C2 continuity)
+      // Note: We use wei_curv_ here. You may need to increase this weight 
+      // because P now has units of (m^2/s^3)^2 = m^4/s^6, very different from previous curvature units.
+      costK = wei_curv_ * penalty * penalty * penalty; 
+      
+      double dJ_dP = 3.0 * wei_curv_ * penalty * penalty;
+
+      Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
+      Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
+
+      // 1. Gradient w.r.t acceleration a
+      // dP/da = 2 * cross * d(cross)/da = 2 * cross * B_vel
+      Eigen::Vector3d dP_da = 2.0 * cross * B_vel;
+
+      // 2. Gradient w.r.t velocity v
+      // dP/dv = d(cross^2)/dv - d(k_lim^2 * v^6)/dv
+      //       = 2 * cross * (-B_acc) - k_lim^2 * 6 * v^5 * (v/|v|)
+      //       = -2 * cross * B_acc - 6 * k_lim * k_lim * v^4 * v
+      Eigen::Vector3d dP_dv = -2.0 * cross * B_acc - 6.0 * k_lim_sqr * v4 * vel;
+
+      gradK_a = dJ_dP * dP_da;
+      gradK_v = dJ_dP * dP_dv;
+
+      return true;
     }
-    
-    // Use eps to avoid division by zero (no hard threshold)
-    double vel2_e = v2 + eps_;
-    double vel3_2_e = vel2_e * sqrt(vel2_e);
-    
-    // Cross product (v × a) in 2D: vx*ay - vy*ax
-    double cross = vel(0) * acc(1) - vel(1) * acc(0);
-    
-    // Curvature: κ = (v × a) / |v|³ (with eps regularization)
-    double curv = cross / vel3_2_e;
-    
-    // Left-right separation: κ ≤ κ_max and κ ≥ -κ_max
-    double violaCurL = curv - max_curv_;   // κ - κ_max > 0 means violation
-    double violaCurR = -curv - max_curv_;  // -κ - κ_max > 0 means violation
-    
+
     gradK_v.setZero();
     gradK_a.setZero();
     costK = 0.0;
-    bool has_violation = false;
-    
-    // B matrix rotates 90 degrees: B * v = (-vy, vx, 0)
-    Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
-    Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
-    
-    // Precompute common terms for gradient
-    // ∂κ/∂v = B*a / |v|³_e - 3*κ*v / (v² + eps)
-    // ∂κ/∂a = B*v / |v|³_e
-    double vel2_e_inv = 1.0 / vel2_e;
-    Eigen::Vector3d dK_dv = B_acc / vel3_2_e - 3.0 * curv * vel * vel2_e_inv;
-    Eigen::Vector3d dK_da = B_vel / vel3_2_e;
-    
-    // Effective weight = base weight * speed modulation
-    double effective_wei = wei_curv_ * speed_weight;
-    
-    // Handle left constraint: κ ≤ κ_max
-    if (violaCurL > 0.0)
-    {
-      has_violation = true;
-      double penaL, penaDL;
-      positiveSmoothedL1(violaCurL, penaL, penaDL);
-      
-      // Gradient: effective_wei * penaD * ∂κ/∂v, effective_wei * penaD * ∂κ/∂a
-      gradK_v += effective_wei * penaDL * dK_dv;
-      gradK_a += effective_wei * penaDL * dK_da;
-      costK += effective_wei * penaL;
-    }
-    
-    // Handle right constraint: κ ≥ -κ_max (i.e., -κ ≤ κ_max)
-    if (violaCurR > 0.0)
-    {
-      has_violation = true;
-      double penaR, penaDR;
-      positiveSmoothedL1(violaCurR, penaR, penaDR);
-      
-      // Gradient: note the sign flip for -κ derivative
-      gradK_v += effective_wei * penaDR * (-dK_dv);
-      gradK_a += effective_wei * penaDR * (-dK_da);
-      costK += effective_wei * penaR;
-    }
-    
-    return has_violation;
+    return false;
   }
 
 
@@ -1646,7 +1615,6 @@ namespace ego_planner
     nh.param("optimization/max_acc", max_acc_, -1.0);
     nh.param("optimization/max_jer", max_jer_, -1.0);
     nh.param("optimization/max_curv", max_curv_, -1.0);
-    nh.param("optimization/velocity_singularity_eps", eps_, 0.01);  // eps to avoid division by zero
   }
 
   void PolyTrajOptimizer::setEnvironment(const GridMap::Ptr &map)
@@ -1670,28 +1638,6 @@ namespace ego_planner
 
   void PolyTrajOptimizer::setUseMultitopologyTrajs(bool use_multitopology_trajs) { multitopology_data_.use_multitopology_trajs = use_multitopology_trajs; }
 
-  // Smoothed L1 penalty function (from Dftpav)
-  // When x < pe: polynomial smooth segment (C2 continuous)
-  // When x >= pe: linear segment with constant derivative = 1
-  void PolyTrajOptimizer::positiveSmoothedL1(const double &x, double &f, double &df)
-  {
-    const double pe = 1.0e-4;
-    const double half = 0.5 * pe;
-    const double f3c = 1.0 / (pe * pe);
-    const double f4c = -0.5 * f3c / pe;
-    const double d2c = 3.0 * f3c;
-    const double d3c = 4.0 * f4c;
 
-    if (x < pe)
-    {
-      f = (f4c * x + f3c) * x * x * x;
-      df = (d3c * x + d2c) * x * x;
-    }
-    else
-    {
-      f = x - half;
-      df = 1.0;
-    }
-  }
 
 } // namespace ego_planner
