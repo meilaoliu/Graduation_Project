@@ -194,7 +194,7 @@
     <param name="grid_map/frame_id"      value="map"/>
 
   <!-- planner manager -->
-    <param name="manager/use_minco" value="true" type="bool"/>
+    <param name="manager/use_minco" value="false" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>

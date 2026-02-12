@@ -136,7 +136,7 @@
 
   <!-- planner manager -->
     <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
-    <param name="manager/use_minco" value="true" type="bool"/>
+    <param name="manager/use_minco" value="false" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>
