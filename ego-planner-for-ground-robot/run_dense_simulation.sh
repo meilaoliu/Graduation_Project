@@ -2,8 +2,8 @@
 
 # Default values
 COUNT=160
-MIN_DIST=1.8
-SEED=41
+MIN_DIST=2.0
+SEED=45
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
