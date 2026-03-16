@@ -720,25 +720,9 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             }
         }
         
-        // 行走过程中：只检查速度方向与目标方向的大角度偏差
-        // 用于处理轨迹规划出现大转弯导致需要掉头的情况
-        if (start_vel_.norm() > 0.3)
-        {
-            double current_vel_dir = atan2(start_vel_(1), start_vel_(0));
-            double dir_diff = yaw_start - current_vel_dir;
-            while (dir_diff > PI) dir_diff -= 2 * PI;
-            while (dir_diff < -PI) dir_diff += 2 * PI;
-
-            // 只有当速度方向与目标方向接近反向（>120度）时才停车
-            // 90度改为120度，减少正常弯道行驶时的误触发
-            if (abs(dir_diff) > 2.0 * PI / 3.0)
-            {
-                ROS_WARN("[FSM forward_only] Velocity direction wrong, force stop. dir_diff=%.1f deg", 
-                         dir_diff * 180.0 / PI);
-                start_vel_.setZero();
-                start_acc_.setZero();
-            }
-        }
+        // 行走过程中：不再强制清零速度，避免初始状态突变导致轨迹振荡
+        // 原先这里在速度方向与目标方向夹角>120°时清零速度和加速度，
+        // 会造成连续重规划时初始条件不一致，MINCO生成的轨迹形状跳跃
     }
         else
         {

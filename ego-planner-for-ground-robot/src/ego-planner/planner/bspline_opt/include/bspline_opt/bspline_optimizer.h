@@ -82,6 +82,7 @@ namespace ego_planner
         bool BsplineOptimizeTrajRefine(const Eigen::MatrixXd &init_points, const double ts, Eigen::MatrixXd &optimal_points);
 
         inline int getOrder(void) { return order_; }
+        inline int getIterNum(void) { return iter_num_; }
 
     private:
         GridMap::Ptr grid_map_;

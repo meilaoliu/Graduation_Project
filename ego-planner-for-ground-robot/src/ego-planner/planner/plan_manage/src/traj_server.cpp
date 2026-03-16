@@ -15,7 +15,13 @@
 #include "std_msgs/UInt8.h"
 #include "visualization_msgs/Marker.h"
 #include <ros/ros.h>
+#include <ros/package.h>
 #include "time.h"
+#include <fstream>
+#include <iomanip>
+#include <signal.h>
+#include <cmath>
+#include <sys/stat.h>
 
 #define PI 3.1415926
 #define N 15
@@ -47,6 +53,59 @@ geometry_msgs::PoseStamped pose_cur;
 tf::Quaternion quat;
 std_msgs::UInt8 is_adjust_pose;
 std_msgs::UInt8 dir;
+
+// ==========  data logging ==========
+struct CmdLogEntry {
+    double time;       // relative to system start
+    double ref_vx, ref_vy;   // reference velocity from trajectory
+    double ref_ax, ref_ay;   // reference acceleration from trajectory
+    double ref_speed;        // |v|
+    double ref_curvature;    // kappa = (vx*ay - vy*ax) / |v|^3
+    double cmd_v, cmd_w;     // MPC output: linear vel, angular vel
+    double odom_x, odom_y, odom_yaw;  // robot actual state
+};
+std::vector<CmdLogEntry> cmd_log_entries_;
+ros::Time system_start_time_;
+bool system_start_time_set_ = false;
+
+std::string getLogDir() {
+    std::string pkg_path = ros::package::getPath("ego_planner");
+    // pkg_path = .../src/ego-planner/planner/plan_manage
+    // target  = .../src/benchmark
+    std::string log_dir = pkg_path + "/../../../../src/benchmark";
+    // Resolve to canonical form
+    char resolved[PATH_MAX];
+    if (realpath(log_dir.c_str(), resolved)) {
+        log_dir = std::string(resolved);
+    }
+    mkdir(log_dir.c_str(), 0755);
+    return log_dir;
+}
+
+void saveCmdLogToFile() {
+    if (cmd_log_entries_.empty()) {
+        ROS_WARN("[TrajServer] No log entries to save.");
+        return;
+    }
+    std::string csv_path = getLogDir() + "/cmd_profile.csv";
+    std::ofstream csv_writer(csv_path, std::ios::out | std::ios::trunc);
+    csv_writer << "time,ref_vx,ref_vy,ref_ax,ref_ay,ref_speed,ref_curvature,cmd_v,cmd_w,odom_x,odom_y,odom_yaw" << std::endl;
+    csv_writer << std::fixed << std::setprecision(6);
+    for (const auto &e : cmd_log_entries_) {
+        csv_writer << e.time << "," << e.ref_vx << "," << e.ref_vy << ","
+                   << e.ref_ax << "," << e.ref_ay << "," << e.ref_speed << ","
+                   << e.ref_curvature << "," << e.cmd_v << "," << e.cmd_w << ","
+                   << e.odom_x << "," << e.odom_y << "," << e.odom_yaw << std::endl;
+    }
+    csv_writer.close();
+    ROS_INFO("[TrajServer] Saved %zu log entries to %s", cmd_log_entries_.size(), csv_path.c_str());
+}
+
+void sigintHandler(int sig) {
+    saveCmdLogToFile();
+    ros::shutdown();
+}
+// ========== End logging ==========
 
 enum DIRECTION {POSITIVE=0,NEGATIVE=1};
 
@@ -498,12 +557,42 @@ void cmdCallback(const ros::TimerEvent &e)
 
     if (t_cur < traj_duration_ && t_cur >= 0.0)
     {
-        //ROS_INFO("MPC_Calculate!");
         start_clock = clock();
         MPC_calculate(t_cur);
         end_clock = clock();
         duration = (double)(end_clock - start_clock) / CLOCKS_PER_SEC *1000;
-        //ROS_INFO("Control times : %f ms",duration);
+
+        // ---- SUPER-style logging: record at control callback ----
+        if (!system_start_time_set_) {
+            system_start_time_ = time_s;
+            system_start_time_set_ = true;
+        }
+        CmdLogEntry entry;
+        entry.time = (time_s - system_start_time_).toSec();
+
+        Eigen::Vector3d ref_vel, ref_acc;
+        if (use_minco_traj_) {
+            ref_vel = minco_traj_->getVel(t_cur);
+            ref_acc = minco_traj_->getAcc(t_cur);
+        } else {
+            ref_vel = traj_[1].evaluateDeBoor(t_cur);
+            ref_acc = traj_[2].evaluateDeBoor(t_cur);
+        }
+        entry.ref_vx = ref_vel(0);
+        entry.ref_vy = ref_vel(1);
+        entry.ref_ax = ref_acc(0);
+        entry.ref_ay = ref_acc(1);
+        double v2 = ref_vel(0)*ref_vel(0) + ref_vel(1)*ref_vel(1);
+        entry.ref_speed = std::sqrt(v2);
+        double v3 = v2 * entry.ref_speed;
+        entry.ref_curvature = (v3 > 1e-6) ? (ref_vel(0)*ref_acc(1) - ref_vel(1)*ref_acc(0)) / v3 : 0.0;
+        entry.cmd_v = cmd.linear.x;
+        entry.cmd_w = cmd.angular.z;
+        entry.odom_x = odom_pos_(0);
+        entry.odom_y = odom_pos_(1);
+        entry.odom_yaw = yaw;
+        cmd_log_entries_.push_back(entry);
+        // ---- End logging ----
     }
     else if (t_cur >= traj_duration_)
     {
@@ -524,7 +613,8 @@ void cmdCallback(const ros::TimerEvent &e)
 
 int main(int argc, char **argv)
 {
-  ros::init(argc, argv, "traj_server");
+  ros::init(argc, argv, "traj_server", ros::init_options::NoSigintHandler);
+  signal(SIGINT, sigintHandler);
   ros::NodeHandle node("~");
 
   std::string cmd_topic,pose_topic;

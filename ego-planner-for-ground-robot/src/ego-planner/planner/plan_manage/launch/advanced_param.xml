@@ -125,7 +125,7 @@
     <param name="grid_map/p_max"  value="0.90"/>
     <param name="grid_map/p_occ"  value="0.80"/>
     <param name="grid_map/min_ray_length" value="0.1"/>
-    <param name="grid_map/max_ray_length" value="4.0"/>
+    <param name="grid_map/max_ray_length" value="8.0"/>
 
     <param name="grid_map/virtual_ceil_height"   value="2.5"/>
     <param name="grid_map/visualization_truncate_height"   value="1.6"/>
@@ -136,11 +136,12 @@
 
   <!-- planner manager -->
     <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
-    <param name="manager/use_minco" value="false" type="bool"/>
+    <param name="manager/use_minco" value="true" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>
     <param name="manager/control_points_distance" value="0.6" type="double"/>
+    <param name="manager/polyTraj_piece_length" value="1.5" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <!--是否开启拓扑同伦轨迹（会增加计算量）-->
@@ -167,11 +168,11 @@
     <param name="optimization/weight_obstacle" value="800.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
     <param name="optimization/weight_feasibility" value="1000.0" type="double"/>
-    <param name="optimization/weight_curv" value="450.0" type="double"/>
+    <param name="optimization/weight_curv" value="1.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="850.0" type="double"/>
-    <param name="optimization/weight_time" value="500.0" type="double"/>
-    <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
+    <param name="optimization/weight_time" value="450.0" type="double"/>
+    <param name="optimization/obstacle_clearance" value="0.20" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.5" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     
     <param name="MPC/v_max" value="1.8" type="double"/>

@@ -2,6 +2,7 @@
 #define _POLY_TRAJ_OPTIMIZER_H_
 
 #include <Eigen/Eigen>
+#include <string>
 #include <path_searching/dyn_a_star.h>
 #include <plan_env/grid_map.h>
 #include <ros/ros.h>
@@ -103,6 +104,12 @@ namespace ego_planner
     double eps_;                                                  // velocity singularity epsilon to avoid division by zero
 
     double t_now_;
+    std::string last_failure_reason_;
+    int last_lbfgs_result_{0};
+    int last_force_stop_type_{0};
+    int last_restart_count_{0};
+    int last_rebound_count_{0};
+    double last_final_cost_{0.0};
 
   public:
     PolyTrajOptimizer() {}
@@ -128,6 +135,12 @@ namespace ego_planner
     inline const ConstraintPoints &getControlPoints(void) { return cps_; }
     inline const poly_traj::MinJerkOpt &getMinJerkOpt(void) { return jerkOpt_; }
     inline int get_cps_num_prePiece_(void) { return cps_num_prePiece_; }
+    inline int getIterNum(void) const { return iter_num_; }
+    inline const std::string &getLastFailureReason(void) const { return last_failure_reason_; }
+    inline int getLastLbfgsResult(void) const { return last_lbfgs_result_; }
+    inline int getLastRestartCount(void) const { return last_restart_count_; }
+    inline int getLastReboundCount(void) const { return last_rebound_count_; }
+    inline double getLastFinalCost(void) const { return last_final_cost_; }
 
     /* main planning API */
     bool optimizeTrajectory(const Eigen::MatrixXd &iniState, const Eigen::MatrixXd &finState,

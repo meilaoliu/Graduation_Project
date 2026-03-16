@@ -86,6 +86,30 @@ namespace ego_planner
 
             flag_success = true;
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f,total_t(ms)=%5.3f,cost=%5.3f\n\033[0m", iter_num_, time_ms, total_time_ms, final_cost);
+
+            // Log trajectory quality metrics
+            {
+              poly_traj::Trajectory traj = jerkOpt_.getTraj();
+              double max_v = 0, max_a = 0, max_k = 0;
+              double dt = 0.05;
+              for (double t = 0; t < traj.getTotalDuration(); t += dt)
+              {
+                Eigen::Vector3d v = traj.getVel(t);
+                Eigen::Vector3d a = traj.getAcc(t);
+                double vn = v.head<2>().norm();
+                double an = a.head<2>().norm();
+                max_v = std::max(max_v, vn);
+                max_a = std::max(max_a, an);
+                if (vn > 0.3)
+                {
+                  double cross = v(0) * a(1) - v(1) * a(0);
+                  double ki = std::abs(cross) / (vn * vn * vn);
+                  max_k = std::max(max_k, ki);
+                }
+              }
+              printf("[TRAJ_OK] max_v=%.2f, max_a=%.2f, max_k=%.2f, duration=%.2f\n",
+                     max_v, max_a, max_k, traj.getTotalDuration());
+            }
           }
           else
           {
@@ -109,6 +133,27 @@ namespace ego_planner
 
     } while ((flag_still_unsafe && restart_nums < 3) ||
              (flag_force_return && force_stop_type_ == STOP_FOR_REBOUND && rebound_times <= 20));
+
+    // Update diagnostic tracking variables
+    last_lbfgs_result_ = flag_success ? 1 : 0;
+    last_restart_count_ = restart_nums;
+    last_rebound_count_ = rebound_times;
+    last_final_cost_ = final_cost;
+    if (!flag_success)
+    {
+      if (restart_nums >= 3)
+        last_failure_reason_ = "max_restarts";
+      else if (rebound_times > 20)
+        last_failure_reason_ = "max_rebounds";
+      else if (force_stop_type_ == STOP_FOR_ERROR)
+        last_failure_reason_ = "force_stop_error";
+      else
+        last_failure_reason_ = "optimization_failed";
+    }
+    else
+    {
+      last_failure_reason_ = "";
+    }
 
     return flag_success;
   }
@@ -284,6 +329,13 @@ namespace ego_planner
     {
       // Search from back to head
       Eigen::Vector3d in(init_points.col(segment_ids[i].second)), out(init_points.col(segment_ids[i].first));
+      // Skip A* if points have diverged
+      double dist = (in - out).norm();
+      if (dist > 50.0 || std::isnan(in(0)) || std::isnan(out(0)))
+      {
+        ROS_WARN("[finelyCheck] A* skipped: diverged points (dist=%.1f)", dist);
+        return CHK_RET::ERR;
+      }
       // Convert 3D to 2D for ground robot A*
       Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
       bool ret = a_star_->AstarSearch(grid_map_->getResolution(), in_2d, out_2d);
@@ -616,6 +668,15 @@ namespace ego_planner
       {
         /*** a star search ***/
         Eigen::Vector3d in(cps_.points.col(segment_ids[i].second)), out(cps_.points.col(segment_ids[i].first));
+        // Skip A* if points have diverged (gradient explosion)
+        double dist = (in - out).norm();
+        if (dist > 50.0 || std::isnan(in(0)) || std::isnan(out(0)))
+        {
+          ROS_WARN("[roughlyCheck] A* skipped: diverged points (dist=%.1f)", dist);
+          segment_ids.erase(segment_ids.begin() + i);
+          --i;
+          continue;
+        }
         // Convert 3D to 2D for ground robot A*
         Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
         bool ret = a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ grid_map_->getResolution(), in_2d, out_2d);
@@ -1179,11 +1240,24 @@ namespace ego_planner
             smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost,
             smoo_cost,
             obs_swarm_feas_qvar_costs(0), // Obstacle
-            obs_swarm_feas_qvar_costs(2), // Feasibility (V+A+K with SmoothedL1)
+            obs_swarm_feas_qvar_costs(2), // Feasibility (V+A+K)
             obs_swarm_feas_qvar_costs(3), // SqrVariance
             time_cost);
   }
-    return smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost;
+
+    double total_cost = smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost;
+
+    // Detect NaN early and log which cost component caused it
+    if (std::isnan(total_cost) || std::isinf(total_cost))
+    {
+      ROS_ERROR("[COST_NAN] iter=%d | Smooth=%.2e | Obs=%.2e | Feas=%.2e | Dist=%.2e | Time=%.2e | T_min=%.4f | T_max=%.4f",
+                opt->iter_num_, smoo_cost,
+                obs_swarm_feas_qvar_costs(0), obs_swarm_feas_qvar_costs(2),
+                obs_swarm_feas_qvar_costs(3), time_cost,
+                T.minCoeff(), T.maxCoeff());
+    }
+
+    return total_cost;
   }
 
   int PolyTrajOptimizer::earlyExitCallback(void *func_data, const double *x, const double *g, const double fx, const double xnorm, const double gnorm, const double step, int n, int k, int ls)
@@ -1443,7 +1517,6 @@ namespace ego_planner
                                                Eigen::Vector3d &gradv,
                                                double &costv)
   {
-    // Use cubic penalty for velocity (more stable than SmoothedL1 for large violations)
     double vpen = v.squaredNorm() - max_vel_ * max_vel_;
     if (vpen > 0)
     {
@@ -1458,7 +1531,6 @@ namespace ego_planner
                                                Eigen::Vector3d &grada,
                                                double &costa)
   {
-    // Use cubic penalty for acceleration (more stable than SmoothedL1 for large violations)
     double apen = a.squaredNorm() - max_acc_ * max_acc_;
     if (apen > 0)
     {
@@ -1483,53 +1555,50 @@ namespace ego_planner
     return false;
   }
 
-  // Curvature constraint using Inequality Transformation
-  // Replaces the previous implementation to avoid singularity at v=0 and L-BFGS issues
+  // Curvature constraint using Inequality Transformation (de-denominator method)
+  // Constraint: |κ| = |(v×a)/|v|³| ≤ κ_max
+  // Transformed: (v×a)² - κ_max² · |v|⁶ ≤ 0  (no division, no singularity at v=0)
   bool PolyTrajOptimizer::feasibilityGradCostK(const Eigen::Vector3d &vel,
                                                const Eigen::Vector3d &acc,
                                                Eigen::Vector3d &gradK_v,
                                                Eigen::Vector3d &gradK_a,
                                                double &costK)
   {
-    // Constraint: |(v x a) / v^3| < k_max
-    // Transformed: (v x a)^2 - k_max^2 * v^6 < 0
-    
     double v2 = vel.squaredNorm();
-    double cross = vel(0) * acc(1) - vel(1) * acc(0); // 2D cross product for ground robot
+    double cross = vel(0) * acc(1) - vel(1) * acc(0); // 2D cross product
     double cross2 = cross * cross;
 
     double k_lim_sqr = max_curv_ * max_curv_;
     double v4 = v2 * v2;
     double v6 = v4 * v2;
 
-    double limit = k_lim_sqr * v6;
-    // Penalty P = LHS - RHS. If P > 0, constraint is violated.
-    double penalty = cross2 - limit; 
+    // P = (v×a)² - κ²·|v|⁶.  P > 0 means constraint violated.
+    double penalty = cross2 - k_lim_sqr * v6;
 
     if (penalty > 0)
     {
-      // Cost = weight * P^3 (cubic penalty for C2 continuity)
-      // Note: We use wei_curv_ here. You may need to increase this weight 
-      // because P now has units of (m^2/s^3)^2 = m^4/s^6, very different from previous curvature units.
-      costK = wei_curv_ * penalty * penalty * penalty; 
-      
-      double dJ_dP = 3.0 * wei_curv_ * penalty * penalty;
+      // Quadratic penalty: cost = w · P²
+      costK = wei_curv_ * penalty * penalty;
+      double dJ_dP = 2.0 * wei_curv_ * penalty;
 
       Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
       Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
 
-      // 1. Gradient w.r.t acceleration a
-      // dP/da = 2 * cross * d(cross)/da = 2 * cross * B_vel
+      // dP/da = 2 · cross · B_vel
       Eigen::Vector3d dP_da = 2.0 * cross * B_vel;
-
-      // 2. Gradient w.r.t velocity v
-      // dP/dv = d(cross^2)/dv - d(k_lim^2 * v^6)/dv
-      //       = 2 * cross * (-B_acc) - k_lim^2 * 6 * v^5 * (v/|v|)
-      //       = -2 * cross * B_acc - 6 * k_lim * k_lim * v^4 * v
+      // dP/dv = -2 · cross · B_acc - 6 · κ² · |v|⁴ · v
       Eigen::Vector3d dP_dv = -2.0 * cross * B_acc - 6.0 * k_lim_sqr * v4 * vel;
 
       gradK_a = dJ_dP * dP_da;
       gradK_v = dJ_dP * dP_dv;
+
+      static int curv_log_count = 0;
+      if (curv_log_count++ % 50 == 0)
+      {
+        double ki_approx = (v2 > 1e-6) ? sqrt(cross2) / (v2 * sqrt(v2)) : 0.0;
+        ROS_WARN("[CURV] ki~=%.3f, max=%.3f, |v|=%.3f, |a|=%.3f, penalty=%.3f, costK=%.3f",
+                 ki_approx, max_curv_, sqrt(v2), acc.norm(), penalty, costK);
+      }
 
       return true;
     }
@@ -1622,7 +1691,7 @@ namespace ego_planner
     grid_map_ = map;
 
     a_star_.reset(new AStar);
-    a_star_->initGridMap(grid_map_, Eigen::Vector2i(100, 100)); // 2D for ground robot
+    a_star_->initGridMap(grid_map_, Eigen::Vector2i(500, 500)); // 2D for ground robot
   }
 
   void PolyTrajOptimizer::setControlPoints(const Eigen::MatrixXd &points)

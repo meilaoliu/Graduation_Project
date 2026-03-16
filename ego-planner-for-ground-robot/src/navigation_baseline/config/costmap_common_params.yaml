@@ -1,0 +1,24 @@
+# Shared parameters for both global and local costmaps
+# Robot: differential drive, 0.6m x 0.6m footprint
+
+robot_base_frame: sensor
+footprint: [[-0.3, -0.3], [-0.3, 0.3], [0.3, 0.3], [0.3, -0.3]]
+
+obstacle_layer:
+  enabled: true
+  observation_sources: registered_scan
+  registered_scan:
+    topic: /registered_scan
+    data_type: PointCloud2
+    sensor_frame: sensor
+    marking: true
+    clearing: true
+    obstacle_range: 5.0
+    raytrace_range: 6.0
+    min_obstacle_height: 0.10
+    max_obstacle_height: 2.00
+
+inflation_layer:
+  enabled: true
+  inflation_radius: 0.55
+  cost_scaling_factor: 5.0

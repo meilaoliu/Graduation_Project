@@ -70,6 +70,8 @@ namespace ego_planner
             poly_traj::MinJerkOpt &initMJO);
 
         bool setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal);
+        void computeCurrentTrajMetrics(double &traj_length, double &max_speed, double &max_curvature);
+        void appendPlanningStats(double total_plan_time_sec, int iterations, const std::string &planner_type);
 
         // !SECTION stable
 

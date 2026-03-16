@@ -261,6 +261,7 @@ namespace ego_planner
     /* planning algorithm parameters */
     double max_vel_, max_acc_, max_jerk_; // physical limits
     double ctrl_pt_dist;                  // distance between adjacient B-spline control points
+    double polyTraj_piece_length;         // piece length for MINCO polynomial trajectory
     double feasibility_tolerance_;        // permitted ratio of vel/acc exceeding limits
     double planning_horizen_;
     bool use_minco_ = false;

@@ -18,7 +18,7 @@ patchwork:
     th_seeds: 0.3
     th_dist: 0.125
     max_r: 200.0
-    min_r: 2.7 # to consider vicinity of mobile plot form.
+    min_r: 0.5 # reduce near-field blind area around the robot in simulation
     uprightness_thr: 0.707 # For uprightness. 45: 0.707 / 60: 0.866. The larger, the more conservative
 
     # The points below the adaptive_seed_selection_margin * sensor_height are filtered
@@ -43,7 +43,7 @@ patchwork:
         num_sectors_each_zone: [16, 32 ,54, 32]
         num_rings_each_zone: [2, 4, 4, 4]
         # Note that `min_r` == `min_ranges_each_zone`[0]!
-        min_ranges_each_zone: [2.7, 12.3625, 22.025, 41.35]
+        min_ranges_each_zone: [0.5, 12.3625, 22.025, 41.35]
         # The elevation_thresholds are with respect to the sensor frame
         # Thus, actually (sensor_height - threshold_value) is the maximum ground height.
         # For instance, for the first ring, 1.723 - 1.2 = 0.523 is acceptable, maximum ground height
