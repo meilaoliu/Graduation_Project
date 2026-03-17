@@ -233,10 +233,17 @@
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     <param name="optimization/velocity_singularity_eps" value="0.01" type="double"/>
 
-    <param name="MPC/v_max" value="1.8" type="double"/>
-    <param name="MPC/w_max" value="1.2" type="double"/>
-    <param name="MPC/omega0" value="1.0" type="double"/>
-    <param name="MPC/omega1" value="0.1" type="double"/>
+    <!-- MPC 控制器参数 -->
+    <param name="MPC/v_max" value="1.5" type="double"/>
+    <param name="MPC/w_max" value="1.5" type="double"/>
+    <param name="MPC/w_pos" value="1.0" type="double"/>
+    <param name="MPC/w_ang" value="5.0" type="double"/>
+    <param name="MPC/rho_N" value="10.0" type="double"/>
+    <param name="MPC/r_v" value="0.1" type="double"/>
+    <param name="MPC/r_w" value="0.1" type="double"/>
+    <param name="MPC/use_feedforward" value="true" type="bool"/>
+    <param name="MPC/use_delay_compensation" value="true" type="bool"/>
+    <param name="MPC/delay_ms" value="50.0" type="double"/>
 
   </node>
 

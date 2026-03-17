@@ -136,7 +136,7 @@
 
   <!-- planner manager -->
     <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
-    <param name="manager/use_minco" value="false" type="bool"/>
+    <param name="manager/use_minco" value="true" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>
@@ -167,19 +167,29 @@
     <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
     <param name="optimization/weight_obstacle" value="800.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="100.0" type="double"/>
-    <param name="optimization/weight_curv" value="100.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="300.0" type="double"/>
+    <param name="optimization/weight_curv" value="200.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="850.0" type="double"/>
-    <param name="optimization/weight_time" value="450.0" type="double"/>
+    <param name="optimization/weight_time" value="500.0" type="double"/>
     <param name="optimization/obstacle_clearance" value="0.1" type="double"/>
     <param name="optimization/obstacle_clearance_soft" value="0.3" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     
-    <param name="MPC/v_max" value="1.8" type="double"/>
-    <param name="MPC/w_max" value="1.2" type="double"/>
-    <!-- <param name="MPC/w_max" value="$(arg max_w)" type="double"/> -->
-    <param name="MPC/omega0" value="1.0" type="double"/>
-    <param name="MPC/omega1" value="0.1" type="double"/>
+    <!-- MPC 控制器参数 -->
+    <param name="MPC/v_max" value="1.5" type="double"/>
+    <param name="MPC/w_max" value="1.5" type="double"/>
+    <!-- 解耦权重: Q = diag(w_pos, w_pos, w_ang), 终端放大 rho_N -->
+    <param name="MPC/w_pos" value="1.0" type="double"/>
+    <param name="MPC/w_ang" value="5.0" type="double"/>
+    <param name="MPC/rho_N" value="10.0" type="double"/>
+    <!-- 输入权重: R = diag(r_v, r_w) -->
+    <param name="MPC/r_v" value="0.1" type="double"/>
+    <param name="MPC/r_w" value="0.1" type="double"/>
+    <!-- 前馈参考输入开关 (消融实验用) -->
+    <param name="MPC/use_feedforward" value="true" type="bool"/>
+    <!-- 延时补偿 -->
+    <param name="MPC/use_delay_compensation" value="true" type="bool"/>
+    <param name="MPC/delay_ms" value="50.0" type="double"/>
 
   </node>
 

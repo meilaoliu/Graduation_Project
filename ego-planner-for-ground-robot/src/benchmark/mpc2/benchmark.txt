@@ -1,0 +1,22 @@
+leo@thinkbook16p:~/Graduation_Project/ego-planner-for-ground-robot$ python3 src/benchmark/analyze_tracking.py --speed-thresh 0.5
+=======================================================
+  MPC Tracking Performance Statistics
+=======================================================
+  Total samples: 1251, duration: 37.50s
+  Reference source: direct (ref_x/ref_y)
+  Straight:
+    Lateral  - mean: 0.41 cm, max: 1.89 cm
+    Heading  - mean: 0.68 deg, max: 3.47 deg
+  Curve:
+    Lateral  - mean: 1.28 cm, max: 2.42 cm
+    Heading  - mean: 3.01 deg, max: 5.27 deg
+  Overall (moving):
+    Lateral  - mean: 0.71 cm, max: 2.42 cm
+    Heading  - mean: 1.48 deg, max: 5.27 deg
+=======================================================
+Saved: tracking_xy.png
+Saved: tracking_cmd.png
+Saved: tracking_error.png
+
+Done.
+
