@@ -20,6 +20,7 @@
   <!-- maximum angular velocity, curvature and angular velocity -->
   <arg name="max_w"/>
   <arg name="max_k"/>
+  <arg name="max_k_inflation"/>
 
 
   <arg name="planning_horizon"/>
@@ -136,7 +137,7 @@
 
   <!-- planner manager -->
     <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
-    <param name="manager/use_minco" value="true" type="bool"/>
+    <param name="manager/use_minco" value="false" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>
@@ -150,7 +151,7 @@
   <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
     <param name="optimization/lambda_collision" value="0.8" type="double"/>
-    <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
+    <param name="optimization/lambda_feasibility" value="1.5" type="double"/>
     <param name="optimization/lambda_fitness" value="1.0" type="double"/>
     <param name="optimization/dist0" value="1.0" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
@@ -158,6 +159,7 @@
     <param name="optimization/max_jerk" value="$(arg max_jer)" type="double"/>
     <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
     <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
+    <param name="optimization/max_k_inflation" value="$(arg max_k_inflation)" type="double"/>
     
     <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>

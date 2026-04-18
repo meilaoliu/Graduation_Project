@@ -1602,10 +1602,6 @@ namespace ego_planner
 
       return true;
     }
-
-    gradK_v.setZero();
-    gradK_a.setZero();
-    costK = 0.0;
     return false;
   }
 

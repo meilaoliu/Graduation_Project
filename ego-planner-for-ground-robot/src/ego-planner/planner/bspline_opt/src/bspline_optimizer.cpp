@@ -2,7 +2,10 @@
 #include "bspline_opt/gradient_descent_optimizer.h"
 
 // ADD new macro definitions to enable/disable constraints
-#define USE_ANGULAR_VELOCITY_CONSTRAINT
+// 论文 Chapter 3 已证明：在已约束 |v|<=v_max 的前提下，约束 |k|<=k_max 即可隐式保证
+// |omega| = |k|*|v| <= k_max * v_max。当 omega_max >= k_max * v_max 时，独立的角速度
+// 惩罚项是冗余的，故关闭 USE_ANGULAR_VELOCITY_CONSTRAINT。
+// #define USE_ANGULAR_VELOCITY_CONSTRAINT
 #define USE_CURVATURE_CONSTRAINT
 
 // using namespace std;
@@ -22,6 +25,9 @@ namespace ego_planner
         nh.param("optimization/max_acc", max_acc_, -1.0);
         nh.param("optimization/max_w", max_w_, -1.0);
         nh.param("optimization/max_k", max_k_, -1.0);
+        // 经验倍率: 取 1.0 为保守默认 (纯控制点 κ_i 约束); 1.1~1.3 可减少冗余优化,
+        // 但需以密采样评估连续轨迹最大 κ(t) 作为验证。
+        nh.param("optimization/max_k_inflation", max_k_inflation_, 1.0);
         
         nh.param("optimization/order", order_, 3);
     }
@@ -718,44 +724,87 @@ namespace ego_planner
 #endif
 
 #ifdef USE_CURVATURE_CONSTRAINT
-        /* curvature feasibility */
+        /* curvature feasibility —— 去分母法 (denominator-free, 与 Chapter 4 MINCO 框架统一)
+         *
+         * 原始约束:  |k| <= k_max_eff,  k = (vx*ay - vy*ax) / ||v||^3
+         * 其中 k_max_eff = max_k_inflation_ * max_k_, 倍率项用于补偿
+         * 纯控制点计算 κ_i 与连续轨迹 κ(t) 之间的系统偏差。
+         *
+         * 等价变换:  k^2 <= k_max_eff^2  <=>  (v x a)^2 <= k_max_eff^2 * ||v||^6
+         * 定义违规量:  P_k = (v x a)^2 - k_max_eff^2 * ||v||^6
+         *   - P_k <= 0  : 曲率可行
+         *   - P_k >  0  : 施加 J_k = w * P_k^2 二次惩罚 (C^2 连续)
+         *
+         * 梯度 (B = [[0,-1],[1,0]] 为 90 度旋转矩阵, v x a = v^T B a):
+         *   dP/da = 2*(v x a) * B*v
+         *   dP/dv = -2*(v x a) * B*a - 6*k_max_eff^2 * ||v||^4 * v
+         *
+         * 关键性质: ||v|| -> 0 时, P_k 与 dP/dv 都连续趋于 0,
+         * 不再出现 ||v||^{-3} 量级的发散, 无需 epsilon 阻尼或阈值跳过.
+         */
+        const double k_max_eff = max_k_ * max_k_inflation_;
+        const double k_max_eff2 = k_max_eff * k_max_eff;
+
+        // 调试统计: 跳过频率控制, 避免刷屏
+        static int curv_log_count = 0;
+        int violated_cnt = 0;
+        double max_abs_kappa_seen = 0.0;
+        double max_violation_seen = 0.0;
+        Eigen::Vector2d max_v_seen(0, 0), max_a_seen(0, 0);
+
         for(int i = 0 ; i < q.cols() - 2 ; i++){
             Eigen::Vector2d vi = (q.col(i + 1).head<2>() - q.col(i).head<2>()) / ts;
             Eigen::Vector2d ai = (q.col(i + 2).head<2>() - 2 * q.col(i + 1).head<2>() + q.col(i).head<2>()) * ts_inv2;
 
-            double vi_x = vi(0) , vi_y = vi(1);
-            double ai_x = ai(0) , ai_y = ai(1);
-            double s2 = vi.squaredNorm();
-            if (s2 < 1e-6) continue; // 防除零
-            double ki = (vi_x*ai_y - vi_y*ai_x) / (s2 * vi.norm()) ;
+            double cross  = vi(0) * ai(1) - vi(1) * ai(0);   // v x a
+            double v_n2   = vi.squaredNorm();                // ||v||^2
+            double v_n4   = v_n2 * v_n2;                     // ||v||^4
+            double v_n6   = v_n4 * v_n2;                     // ||v||^6
 
-            if(ki > max_k_){
-                cost += pow(ki - max_k_ , 2);
-                double gk = 2*(ki - max_k_);
-                Eigen::Vector2d gkv = gk * ((-B*ai / (s2 * vi.norm())) - 3*ki*vi / s2);
-                Eigen::Vector2d gka = gk * ( B * vi / ( s2 * vi.norm()) );
-                gradient.col(i + 0).head<2>() +=  -gkv/ts + gka*ts_inv2;
-                gradient.col(i + 1).head<2>() +=  gkv/ts - 2.0 * gka*ts_inv2;
-                gradient.col(i + 2).head<2>() += gka*ts_inv2;
-
-                ROS_WARN("Curvature violation at segment %d: ki=%.3f > max_k=%.3f. ", i, ki, max_k_);
-                std::cout << "  Gradient g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
-                std::cout << "  Gradient g_kappa_a: [" << gka.x() << ", " << gka.y() << "]" << std::endl;
-            }
-            else if(ki < -max_k_){
-                cost += pow(ki + max_k_ , 2);
-                double gk = 2*(ki + max_k_);
-                Eigen::Vector2d gkv = gk * ((-B*ai / (s2 * vi.norm())) - 3*ki*vi / s2);
-                Eigen::Vector2d gka = gk * ( B * vi / ( s2 * vi.norm()) );
-                gradient.col(i + 0).head<2>() +=  -gkv/ts + gka*ts_inv2;
-                gradient.col(i + 1).head<2>() +=  gkv/ts - 2.0 * gka*ts_inv2;
-                gradient.col(i + 2).head<2>() += gka*ts_inv2;
-
-                ROS_WARN("Curvature violation at segment %d: ki=%.3f > max_k=%.3f. ", i, ki, max_k_);
-                std::cout << "  Gradient g_kappa_v: [" << gkv.x() << ", " << gkv.y() << "]" << std::endl;
-                std::cout << "  Gradient g_kappa_a: [" << gka.x() << ", " << gka.y() << "]" << std::endl;
+            // 调试: 记录当前控制点上的离散曲率估计 (仅用于日志)
+            // 仅在 |v| > 0.05 m/s 时纳入统计, 避免 1/|v|^3 分母放大造成的伪高值
+            const double v_min_stat = 0.05;
+            if (v_n2 > v_min_stat * v_min_stat) {
+                double kappa_est = std::abs(cross) / (v_n2 * std::sqrt(v_n2));
+                if (kappa_est > max_abs_kappa_seen) {
+                    max_abs_kappa_seen = kappa_est;
+                    max_v_seen = vi;
+                    max_a_seen = ai;
+                }
             }
 
+            double P_k = cross * cross - k_max_eff2 * v_n6;
+            if (P_k <= 0.0) continue; // 曲率可行, 无惩罚
+
+            ++violated_cnt;
+            if (P_k > max_violation_seen) max_violation_seen = P_k;
+
+            cost += P_k * P_k;                // J_k = P_k^2
+            double dJ_dP = 2.0 * P_k;         // dJ/dP
+
+            // dP/dv = -2*cross*(B*a) - 6*k_max_eff^2*||v||^4 * v
+            Eigen::Vector2d dP_dv = -2.0 * cross * (B * ai) - 6.0 * k_max_eff2 * v_n4 * vi;
+            // dP/da =  2*cross*(B*v)
+            Eigen::Vector2d dP_da =  2.0 * cross * (B * vi);
+
+            Eigen::Vector2d gkv = dJ_dP * dP_dv;
+            Eigen::Vector2d gka = dJ_dP * dP_da;
+
+            // 链式回传到控制点: vi = (q_{i+1}-q_i)/ts,  ai = (q_{i+2}-2q_{i+1}+q_i)/ts^2
+            gradient.col(i + 0).head<2>() += -gkv / ts + gka * ts_inv2;
+            gradient.col(i + 1).head<2>() +=  gkv / ts - 2.0 * gka * ts_inv2;
+            gradient.col(i + 2).head<2>() +=                  gka * ts_inv2;
+        }
+
+        // 每 50 次调用打一次概要, 违规时额外详细输出
+        if (++curv_log_count % 50 == 0) {
+            ROS_INFO("[CURV] cps=%ld, max|k_i|=%.3f, k_max=%.3f, k_eff=%.3f(x%.2f), violated=%d",
+                     q.cols(), max_abs_kappa_seen, max_k_, k_max_eff, max_k_inflation_, violated_cnt);
+        }
+        if (violated_cnt > 0) {
+            ROS_WARN("[CURV] %d/%ld points violated; max|k_i|=%.3f > k_eff=%.3f, max P_k=%.3e, |v|=%.3f, |a|=%.3f",
+                     violated_cnt, q.cols(), max_abs_kappa_seen, k_max_eff, max_violation_seen,
+                     max_v_seen.norm(), max_a_seen.norm());
         }
 #endif
 

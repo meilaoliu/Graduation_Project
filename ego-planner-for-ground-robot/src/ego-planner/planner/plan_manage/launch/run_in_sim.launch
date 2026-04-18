@@ -41,6 +41,7 @@
     <!-- maximum angular velocity, curvature and angular velocity -->
     <arg name="max_w" value="2.0" />
     <arg name="max_k" value="2.0" />
+    <arg name="max_k_inflation" value="8.0" />
 
     <!--always set to 1.5 times grater than sensing horizen-->
     <arg name="planning_horizon" value="7.5" />

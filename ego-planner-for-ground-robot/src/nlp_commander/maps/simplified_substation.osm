@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="simplified">
+  <!-- 简化版变电站拓扑语义地图：仅保留节点名称与语义标签，供大模型阅读 -->
+
+  <node id="1">
+    <tag k="name" v="入口点"/>
+    <tag k="area" v="east"/>
+    <tag k="device_type" v="entry"/>
+  </node>
+
+  <node id="2">
+    <tag k="name" v="插值点1"/>
+    <tag k="area" v="east"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="3">
+    <tag k="name" v="低压配电室1"/>
+    <tag k="area" v="east"/>
+    <tag k="device_type" v="low_voltage_room"/>
+  </node>
+
+  <node id="4">
+    <tag k="name" v="低压配电室2"/>
+    <tag k="area" v="east"/>
+    <tag k="device_type" v="low_voltage_room"/>
+  </node>
+
+  <node id="5">
+    <tag k="name" v="低压配电室3"/>
+    <tag k="area" v="east"/>
+    <tag k="device_type" v="low_voltage_room"/>
+  </node>
+
+  <node id="6">
+    <tag k="name" v="高压配电区巡检点1"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="hv_switchgear"/>
+  </node>
+
+  <node id="7">
+    <tag k="name" v="高压配电区巡检点2"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="hv_switchgear"/>
+  </node>
+
+  <node id="8">
+    <tag k="name" v="高压配电区巡检点3"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="hv_switchgear"/>
+  </node>
+
+  <node id="9">
+    <tag k="name" v="变压器区1"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="transformer"/>
+  </node>
+
+  <node id="10">
+    <tag k="name" v="变压器区2"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="transformer"/>
+  </node>
+
+  <node id="11">
+    <tag k="name" v="变压器区3"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="transformer"/>
+  </node>
+
+  <node id="12">
+    <tag k="name" v="插值点2"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="13">
+    <tag k="name" v="3SVG无功补偿区"/>
+    <tag k="area" v="west"/>
+    <tag k="device_type" v="svg"/>
+  </node>
+
+  <node id="14">
+    <tag k="name" v="2SVG无功补偿区"/>
+    <tag k="area" v="west"/>
+    <tag k="device_type" v="svg"/>
+  </node>
+
+  <node id="15">
+    <tag k="name" v="1SVG无功补偿区"/>
+    <tag k="area" v="west"/>
+    <tag k="device_type" v="svg"/>
+  </node>
+
+  <node id="16">
+    <tag k="name" v="插值点3"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="17">
+    <tag k="name" v="35kv配电箱1"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="mv_switchgear"/>
+  </node>
+
+  <node id="18">
+    <tag k="name" v="35kv配电箱2"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="mv_switchgear"/>
+  </node>
+
+  <node id="19">
+    <tag k="name" v="35kv配电箱3"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="mv_switchgear"/>
+  </node>
+
+  <node id="20">
+    <tag k="name" v="插值点4"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="21">
+    <tag k="name" v="插值点5"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="22">
+    <tag k="name" v="插值点6"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+  <node id="23">
+    <tag k="name" v="插值点7"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
+
+</osm>
+

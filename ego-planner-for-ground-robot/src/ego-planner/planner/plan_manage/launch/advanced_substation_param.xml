@@ -20,6 +20,7 @@
   <!-- maximum angular velocity, curvature and angular velocity -->
   <arg name="max_w"/>
   <arg name="max_k"/>
+  <arg name="max_k_inflation"/>
 
 
   <arg name="planning_horizon"/>
@@ -215,6 +216,7 @@
     <param name="optimization/max_jerk" value="$(arg max_jer)" type="double"/>
     <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
     <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
+    <param name="optimization/max_k_inflation" value="$(arg max_k_inflation)" type="double"/>
     
     <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>

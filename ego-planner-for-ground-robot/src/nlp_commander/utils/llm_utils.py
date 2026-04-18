@@ -1,14 +1,19 @@
-# -*- coding: utf-8 -*-
 """
-LLM工具模块
-负责与大语言模型的交互
+LLM 工具模块
+
+负责与大语言模型的交互。
+当前实现采用基于 CoT 与 JSON 结构化输出的语义解析方案，
+大模型读取简化后的 OSM 拓扑语义地图，
+输出任务类型与目标设备集合等高层语义信息。
 """
 
 import os
-import base64
 import json
-from openai import OpenAI
 from typing import Dict, List, Optional, Any
+
+from openai import OpenAI
+
+from .osm_map_loader import load_simplified_osm
 
 try:
     import rospy
@@ -20,191 +25,152 @@ except ImportError:
         def logwarn(self, msg): print(f"WARN: {msg}")
     rospy = MockRospy()
 
+
 class LLMClient:
     """大语言模型客户端"""
-    
+
     def __init__(self, api_key: str = None, base_url: str = None):
         # 清理代理环境变量
-        for proxy_var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+        for proxy_var in [
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+        ]:
             os.environ.pop(proxy_var, None)
-        
-        # 初始化客户端
+
+        # 初始化客户端（DashScope OpenAI 兼容接口）
         self.client = OpenAI(
             api_key=api_key or "sk-905de984fe624c8d91db26b4f081a676",
             base_url=base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
-        
-        # 变电站俯视图路径
-        self.map_image_path = "/home/leo/Graduation_Project/ego-planner-for-ground-robot/src/nlp_commander/变电站俯视标记图.jpg"
-    
-    def encode_image_to_base64(self, image_path: str) -> Optional[str]:
-        """将图像文件编码为base64格式"""
+
+        # 简化版 OSM 地图路径（相对于 nlp_commander 目录）
+        self.simplified_osm_path = "maps/simplified_substation.osm"
+
+    def create_system_prompt(
+        self, current_pos_info: str, available_locations: List[str]
+    ) -> str:
+        """
+        创建系统提示词。
+
+        将简化后的 OSM 拓扑语义地图作为文本上下文注入，
+        要求模型按照 CoT 链条进行推理，并以 JSON 形式输出任务类型与目标设备集合。
+        """
         try:
-            with open(image_path, "rb") as image_file:
-                return base64.b64encode(image_file.read()).decode('utf-8')
+            osm_text = load_simplified_osm(self.simplified_osm_path)
         except Exception as e:
-            rospy.logerr(f"图像编码失败: {e}")
-            return None
-    
-    def create_tools_definition(self) -> List[Dict[str, Any]]:
-        """创建Function Call工具定义"""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "navigate_robot_with_path",
-                    "description": "执行机器人巡检任务。根据用户指令规划巡检路径。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "waypoint_sequence": {
-                                "type": "array",
-                                "description": "按顺序排列的航点名称列表，例如：['入口点', '插值点1', '低压配电室1', '高压配电区巡检点1']。注意：只需要指定目标设备点，系统会自动使用Dijkstra算法计算最优路径。",
-                                "items": {
-                                    "type": "string"
-                                }
-                            },
-                            "task_description": {
-                                "type": "string",
-                                "description": "任务描述，说明这次巡检的目的，例如：'前往高压配电区巡检点1进行设备检查'"
-                            }
-                        },
-                        "required": ["waypoint_sequence", "task_description"]
-                    }
-                }
-            }
-        ]
-    
-    def create_system_prompt(self, current_pos_info: str, available_locations: List[str]) -> str:
-        """创建系统提示词"""
-        return f"""你是一个专业的变电站巡检机器人智能助手。你的任务是理解用户的巡检指令，并调用navigate_robot_with_path函数来执行。
+            rospy.logwarn(f"加载简化 OSM 地图失败，将不提供地图上下文: {e}")
+            osm_text = ""
 
-🤖 **机器人当前位置**: {current_pos_info}
+        devices_str = ", ".join(available_locations)
 
-🏭 **变电站设备分布**:
-变电站设备按物理位置分为三个主要区域：
-- **东侧区域**: 入口点、插值点1、低压配电室1-3
-- **中间区域**: 35kV配电箱1-3、高压配电区巡检点1-3、变压器区1-3  
-- **西侧区域**: 1SVG无功补偿区、2SVG无功补偿区、3SVG无功补偿区
+        system_prompt = f"""
+你是一个面向变电站巡检机器人的智能任务规划助手。
+你的职责是：阅读变电站的拓扑语义地图与用户的自然语言指令，
+推理出应该巡检哪些设备、属于哪一类巡检任务，并给出结构化的 JSON 输出。
 
-📍 **全部可用设备点**: 
-{chr(10).join([f"   • {loc}" for loc in available_locations])}
+【地图说明（简化 OSM 文本，仅保留语义标签）】
+下面是一份经过简化处理的变电站拓扑语义地图，采用 OpenStreetMap XML 格式表示。
+其中：
+- 每个 <node> 代表一个设备或中间航点，包含：
+  - name: 设备名称（与你需要输出的名称完全一致）
+  - area: 所属区域（east/center/west）
+  - device_type: 设备类型（如 entry、low_voltage_room、hv_switchgear、transformer、svg、mv_switchgear、waypoint）
 
-🛠️ **路径规划说明**:
-系统使用Dijkstra算法自动计算最优路径，你只需要：
-1. 理解用户意图，确定目标设备点
-2. 调用navigate_robot_with_path函数，提供航点序列
+请仔细阅读该地图文本，并在推理时充分利用其中的语义和区域信息。
 
-🎯 **航点选择策略**:
-- **单个设备**: 用户想去单个设备点
-  例如: "去低压配电室1" → waypoint_sequence: ["低压配电室1"]
-  
-- **区域巡检**: 用户想检查某个区域的所有设备
-  例如: "检查SVG区" → waypoint_sequence: ["1SVG无功补偿区", "2SVG无功补偿区", "3SVG无功补偿区"]
-  
-- **完整巡检**: 用户想完整巡检所有设备
-  例如: "完整巡检一遍" → waypoint_sequence: [所有设备点列表]
-  
-- **自定义路径**: 用户指定了具体设备点
-  例如: "先去低压配电室1，再去35kV配电箱2" → waypoint_sequence: ["低压配电室1", "35kv配电箱2"]
+<地图开始>
+{osm_text}
+<地图结束>
 
-🔍 **设备名称匹配**:
-支持模糊匹配，例如:
-- "高压配电区1" → "高压配电区巡检点1" 
-- "SVG区" → ["1SVG无功补偿区", "2SVG无功补偿区", "3SVG无功补偿区"]
-- "变压器" → ["变压器区1", "变压器区2", "变压器区3"]
+【当前机器人状态】
+- 当前位置信息: {current_pos_info}
+- 系统已知的所有可用设备点名称: {devices_str}
 
-⚠️ **重要**: 必须调用navigate_robot_with_path函数来执行巡检任务！"""
-    
-    def process_inspection_command(self, command: str, current_pos_info: str, available_locations: List[str]) -> Dict[str, Any]:
+【你的推理任务】
+给定一条中文巡检指令，你需要按照如下思维链进行推理：
+1. 意图分析：判断用户想做什么类型的巡检（例如：单个设备巡检、某个功能区域的巡检、完整变电站巡检、或按照指定顺序访问多个设备）。
+2. 目标设备检索：在上述地图中检索与指令最相关的设备节点列表，并给出排序理由（例如：按照空间分布、编号顺序或风险优先级）。
+3. 任务类型判定：在 {{single_target, area_inspection, full_inspection, custom_path}} 四类任务中选择一种最合适的类型。
+
+【输出格式要求】
+你必须严格输出一个 JSON 对象（不要包含任何多余的文本），格式为：
+{{
+  "reasoning": "用中文简要说明你的思考过程，包括意图分析和设备选择依据。",
+  "task_type": "single_target / area_inspection / full_inspection / custom_path 之一",
+  "target_devices": [
+    {{"name": "设备名称1", "priority": 1}},
+    {{"name": "设备名称2", "priority": 2}}
+  ],
+  "task_description": "一句话概括本次巡检任务的目的和范围"
+}}
+
+其中：
+- target_devices 中的 name 必须来自地图中的设备名称，且尽量与用户指令语义对齐。
+- priority 为正整数，数值越小说明优先级越高。
+- 当用户要求完整巡检时，可以将所有设备点都列入 target_devices，并按合理顺序排序。
+- 若用户指令无法在地图中找到对应设备，请在 reasoning 中解释，并根据地图信息给出最接近的备选设备列表。
+
+当前对话将只包含一条用户指令，因此你不需要关心多轮对话，只需专注于本次指令的语义解析与规划。
+"""
+        return system_prompt
+
+    def process_inspection_command(
+        self,
+        command: str,
+        current_pos_info: str,
+        available_locations: List[str],
+    ) -> Dict[str, Any]:
         """
-        处理巡检指令
-        
+        处理巡检指令。
+
         Args:
-            command: 用户指令
+            command: 用户自然语言指令
             current_pos_info: 当前位置信息
-            available_locations: 可用位置列表
-            
+            available_locations: 可用设备点名称列表
+
         Returns:
-            LLM响应结果
+            dict: 若成功，则形如 {"success": True, "parsed": {...}}，
+                  其中 parsed 为大模型输出的 JSON 对象。
         """
-        # 构建消息 - 纯文本模式，不上传图片
         system_prompt = self.create_system_prompt(current_pos_info, available_locations)
-        tools = self.create_tools_definition()
-        
-        user_message = f"""用户巡检指令: {command}
-
-🤖 机器人当前状态:
-- 位置: {current_pos_info}
-
-请分析指令并调用相应的导航函数。记住：
-1. 只指定最终目标设备点，不要指定中间路径
-2. 系统会自动使用Dijkstra算法计算最优路径
-3. 必须调用navigate_robot_with_path函数
-
-📍 可用设备点参考: {', '.join(available_locations)}"""
+        user_message = f"用户巡检指令: {command}"
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ]
-        
+
         try:
             response = self.client.chat.completions.create(
-                model="qwen-plus",  # 使用文本模型
+                model="qwen-plus",
                 messages=messages,
-                tools=tools,
-                tool_choice="required",  # 强制使用工具调用
+                response_format={"type": "json_object"},
             )
-            
+
             response_message = response.choices[0].message
-            tool_calls = response_message.tool_calls
-            
-            rospy.loginfo(f"LLM响应 - tool_calls: {tool_calls}")
-            rospy.loginfo(f"LLM响应 - content: {response_message.content}")
-            
-            if tool_calls:
-                rospy.loginfo(f"收到Function Call: {len(tool_calls)}个")
-                tool_call = tool_calls[0]
-                function_name = tool_call.function.name
-                rospy.loginfo(f"调用函数: {function_name}")
-                
-                if function_name == "navigate_robot_with_path":
-                    function_args = json.loads(tool_call.function.arguments)
-                    rospy.loginfo(f"函数参数: {function_args}")
-                    return {
-                        "success": True,
-                        "function_name": function_name,
-                        "arguments": function_args
-                    }
-                else:
-                    return {"error": f"❌ 未知函数: {function_name}"}
+            content = response_message.content
+
+            # 在 DashScope 的 OpenAI 兼容模式下，content 通常是 JSON 字符串
+            if isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                    return {"success": True, "parsed": parsed}
+                except Exception as parse_error:
+                    rospy.logerr(f"解析 JSON 字符串失败: {parse_error}")
+                    return {"error": f"❌ 无法解析大模型 JSON 输出: {content}"}
+            elif isinstance(content, dict):
+                return {"success": True, "parsed": content}
             else:
-                rospy.logwarn("大模型没有返回Function Call")
-                # 尝试从响应内容中解析
-                content = response_message.content
-                if content and "navigate_robot_with_path" in content:
-                    try:
-                        import re
-                        json_match = re.search(r'\{[\s\S]*\}', content)
-                        if json_match:
-                            parsed_json = json.loads(json_match.group())
-                            if "arguments" in parsed_json:
-                                rospy.loginfo(f"从内容中解析到参数: {parsed_json['arguments']}")
-                                return {
-                                    "success": True,
-                                    "function_name": "navigate_robot_with_path",
-                                    "arguments": parsed_json["arguments"]
-                                }
-                    except Exception as parse_error:
-                        rospy.logerr(f"解析响应JSON失败: {parse_error}")
-                
-                return {"error": f"❌ 大模型没有正确调用导航函数。响应内容: {content}"}
-                
+                return {"error": f"❌ 未知的响应内容类型: {type(content)}"}
+
         except Exception as e:
             rospy.logerr(f"大模型调用错误: {e}")
             return {"error": f"❌ 大模型调用失败: {str(e)}"}
-    
+
     def get_available_models(self) -> List[str]:
         """获取可用的模型列表"""
         try:
@@ -212,4 +178,4 @@ class LLMClient:
             return [model.id for model in models.data]
         except Exception as e:
             rospy.logerr(f"获取模型列表失败: {e}")
-            return [] 
+            return []
