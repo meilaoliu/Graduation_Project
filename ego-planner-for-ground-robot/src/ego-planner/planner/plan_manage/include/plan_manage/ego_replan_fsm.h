@@ -88,8 +88,12 @@ namespace ego_planner
     Eigen::Vector3d init_pt_, start_pt_, start_vel_, start_acc_, start_yaw_; // start state
     Eigen::Vector3d end_pt_, end_vel_;                                       // goal state
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
+    bool touch_goal_{false};                                                  // P2-C: getLocalTarget 设置, 取代 localTrajReachTarget() 的近似判定
     Eigen::Vector3d goal_last;
     int current_wp_;
+
+    // Fix G: stuck 检测 — 连续 init_collision_dense 触发 emergency stop + 全局重规
+    int consecutive_init_collision_count_{0};
 
     bool flag_escape_emergency_;
 

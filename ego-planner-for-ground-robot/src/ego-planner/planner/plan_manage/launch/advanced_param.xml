@@ -137,7 +137,7 @@
 
   <!-- planner manager -->
     <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
-    <param name="manager/use_minco" value="false" type="bool"/>
+    <param name="manager/use_minco" value="true" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
     <param name="manager/max_jerk" value="4" type="double"/>
@@ -170,11 +170,11 @@
     <param name="optimization/weight_obstacle" value="800.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
     <param name="optimization/weight_feasibility" value="300.0" type="double"/>
-    <param name="optimization/weight_curv" value="200.0" type="double"/>
+    <param name="optimization/weight_curv" value="800.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="850.0" type="double"/>
-    <param name="optimization/weight_time" value="500.0" type="double"/>
-    <param name="optimization/obstacle_clearance" value="0.1" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="0.3" type="double"/>
+    <param name="optimization/weight_time" value="450.0" type="double"/>
+    <param name="optimization/obstacle_clearance" value="0.14" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.23" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     
     <!-- MPC 控制器参数 -->

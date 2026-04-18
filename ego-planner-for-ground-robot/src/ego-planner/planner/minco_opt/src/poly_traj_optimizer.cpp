@@ -1,4 +1,5 @@
 #include "minco_opt/poly_traj_optimizer.h"
+#include <random>
 
 using namespace std;
 
@@ -26,6 +27,8 @@ namespace ego_planner
     int restart_nums = 0, rebound_times = 0;
     bool flag_force_return, flag_still_unsafe, flag_success;
     multitopology_data_.initial_obstacles_avoided = false;
+    // P1-A 修订: 进入新一轮优化前清空, 避免上一次调用残留覆盖本次诊断
+    last_failure_reason_ = "";
 
     // Preparision 2: Trajectory related params
     t_now_ = ros::Time::now().toSec();
@@ -70,6 +73,13 @@ namespace ego_planner
       t2 = ros::Time::now();
       double time_ms = (t2 - t1).toSec() * 1000;
       double total_time_ms = (t2 - t0).toSec() * 1000;
+
+      // [RESTART_DIAG] 每轮 LBFGS 退出后的状态: 用于查 max_restarts 真因
+      ROS_INFO_THROTTLE(0.5,
+                        "[RESTART_DIAG] iter=%d restart=%d rebound=%d lbfgs_ret=%d(%s) force_stop=%d cost=%.3e time_ms=%.1f",
+                        iter_num_, restart_nums, rebound_times, result,
+                        lbfgs::lbfgs_strerror(result), (int)force_stop_type_,
+                        final_cost, time_ms);
 
       /* ---------- get result and check collision ---------- */
       if (result == lbfgs::LBFGS_CONVERGENCE ||
@@ -117,6 +127,15 @@ namespace ego_planner
             flag_still_unsafe = true;
             restart_nums++;
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f, fine check collided, keep optimizing\n\033[0m", iter_num_, time_ms);
+            // [Fix J: 确定性 restart 扰动] 0.5cm→2cm→5cm,
+            // 不再随机, 按维度轮询正负方向 → 跨帧 plan 看到同样的 restart 序列,
+            // 减少 plan #N 与 plan #N+1 落在不同局部极小导致的左右跳变。
+            {
+              double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+              for (int k = 0; k < (int)initInnerPts.size(); ++k)
+                x_init[k] += ((k % 2 == 0) ? amp : -amp);
+              // 时间维 不再加噪 (避免与 Fix H 虚拟时间区间同时发生漂移)
+            }
         }
       }
       else if (result == lbfgs::LBFGSERR_CANCELED)
@@ -129,6 +148,15 @@ namespace ego_planner
       {
         PRINTF_COND("iter=%d, time(ms)=%f, error\n", iter_num_, time_ms);
         ROS_WARN_COND(VERBOSE_OUTPUT, "Solver error. Return = %d, %s. Skip this planning.", result, lbfgs::lbfgs_strerror(result));
+        // [Fix J: ROUNDING_ERROR 同样确定性微扰动]
+        if (result == lbfgs::LBFGSERR_ROUNDING_ERROR && restart_nums < 3)
+        {
+          flag_still_unsafe = true;
+          restart_nums++;
+          double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+          for (int k = 0; k < (int)initInnerPts.size(); ++k)
+            x_init[k] += ((k % 2 == 0) ? amp : -amp);
+        }
       }
 
     } while ((flag_still_unsafe && restart_nums < 3) ||
@@ -141,14 +169,25 @@ namespace ego_planner
     last_final_cost_ = final_cost;
     if (!flag_success)
     {
-      if (restart_nums >= 3)
-        last_failure_reason_ = "max_restarts";
-      else if (rebound_times > 20)
-        last_failure_reason_ = "max_rebounds";
-      else if (force_stop_type_ == STOP_FOR_ERROR)
-        last_failure_reason_ = "force_stop_error";
-      else
-        last_failure_reason_ = "optimization_failed";
+      // P1-A 修订: 优先保留下游已经填好的细分标签
+      // (init_collision_dense / astar_init_err / astar_search_err / astar_input_diverged 等),
+      // 仅当还未被赋值时, 再退化到通用桶 max_restarts/max_rebounds/force_stop_error/optimization_failed.
+      const bool specific_already_set =
+          (last_failure_reason_ == "init_collision_dense") ||
+          (last_failure_reason_ == "astar_init_err") ||
+          (last_failure_reason_ == "astar_search_err") ||
+          (last_failure_reason_ == "astar_input_diverged");
+      if (!specific_already_set)
+      {
+        if (restart_nums >= 3)
+          last_failure_reason_ = "max_restarts";
+        else if (rebound_times > 20)
+          last_failure_reason_ = "max_rebounds";
+        else if (force_stop_type_ == STOP_FOR_ERROR)
+          last_failure_reason_ = "force_stop_error";
+        else
+          last_failure_reason_ = "optimization_failed";
+      }
     }
     else
     {
@@ -329,22 +368,43 @@ namespace ego_planner
     {
       // Search from back to head
       Eigen::Vector3d in(init_points.col(segment_ids[i].second)), out(init_points.col(segment_ids[i].first));
-      // Skip A* if points have diverged
+      // Skip A* if points have diverged (NaN/uninitialized -> spurious huge distance)
       double dist = (in - out).norm();
-      if (dist > 50.0 || std::isnan(in(0)) || std::isnan(out(0)))
+      if (!in.allFinite() || !out.allFinite() || dist > 50.0)
       {
-        ROS_WARN("[finelyCheck] A* skipped: diverged points (dist=%.1f)", dist);
-        return CHK_RET::ERR;
+        ROS_WARN_THROTTLE(1.0,
+                          "[finelyCheck] A* skipped: diverged points (dist=%.1f), drop segment %zu/%zu",
+                          dist, i + 1, segment_ids.size());
+        last_failure_reason_ = "astar_input_diverged";
+        // Drop this bad segment instead of aborting the whole optimization step.
+        // If all segments are bad, the loop ends with empty a_star_pathes and we
+        // fall through to OBS_FREE below, letting the caller proceed with the
+        // current init guess (the next iteration's roughlyCheck will re-evaluate).
+        segment_ids.erase(segment_ids.begin() + i);
+        --i;
+        continue;
       }
       // Convert 3D to 2D for ground robot A*
       Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
-      bool ret = a_star_->AstarSearch(grid_map_->getResolution(), in_2d, out_2d);
-      if (ret) // SUCCESS
+      // P2-A + P1-A: 区分 INIT_ERR (端点无效) 与 SEARCH_ERR (扩展失败)
+      ASTAR_RET ret = a_star_->AstarSearchTyped(grid_map_->getResolution(), in_2d, out_2d);
+      if (ret == ASTAR_RET::SUCCESS)
       {
         a_star_pathes.push_back(a_star_->getPath());
       }
-      else if (!ret && i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+      else if (ret == ASTAR_RET::INIT_ERR)
       {
+        // 端点本身无效 (在障碍/出界): 丢段 + 记录可识别原因, 让上层 reReplan
+        ROS_WARN_THROTTLE(1.0,
+                          "[finelyCheck] A* INIT_ERR seg %zu/%zu, drop", i + 1, segment_ids.size());
+        last_failure_reason_ = "astar_init_err";
+        segment_ids.erase(segment_ids.begin() + i);
+        --i;
+        continue;
+      }
+      else if (i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+      {
+        last_failure_reason_ = "astar_search_err";
         segment_ids[i].second = segment_ids[i + 1].second;
         segment_ids.erase(segment_ids.begin() + i + 1);
         --i;
@@ -353,6 +413,7 @@ namespace ego_planner
       else
       {
         ROS_WARN_COND(VERBOSE_OUTPUT, "A-star error, force return!");
+        last_failure_reason_ = "astar_search_err";
         return CHK_RET::ERR;
       }
     }
@@ -651,6 +712,10 @@ namespace ego_planner
         {
           ROS_WARN("Local target in collision, skip this planning.");
 
+          // P1-A: 显式标记 "局部目标贴障碍" 失败 (与 max_restarts 区分)
+          last_failure_reason_ = "init_collision_dense";
+          // P1-B: 记录 force_stop 触发点, 便于事后回溯
+          ROS_DEBUG_NAMED("minco_force_stop", "STOP_FOR_ERROR @ roughlyCheck: terminal-in-obstacle");
           force_stop_type_ = STOP_FOR_ERROR;
           return false;
         }
@@ -679,13 +744,23 @@ namespace ego_planner
         }
         // Convert 3D to 2D for ground robot A*
         Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
-        bool ret = a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ grid_map_->getResolution(), in_2d, out_2d);
-        if (ret) // SUCCESS
+        // P2-A + P1-A: 区分 INIT_ERR / SEARCH_ERR
+        ASTAR_RET ret = a_star_->AstarSearchTyped(/*(in-out).norm()/10+0.05*/ grid_map_->getResolution(), in_2d, out_2d);
+        if (ret == ASTAR_RET::SUCCESS)
         {
           a_star_pathes.push_back(a_star_->getPath());
         }
-        else if (!ret && i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+        else if (ret == ASTAR_RET::INIT_ERR)
         {
+          ROS_WARN_THROTTLE(1.0,
+                            "[roughlyCheck] A* INIT_ERR seg %zu/%zu, drop", i + 1, segment_ids.size());
+          last_failure_reason_ = "astar_init_err";
+          segment_ids.erase(segment_ids.begin() + i);
+          --i;
+        }
+        else if (i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+        {
+          last_failure_reason_ = "astar_search_err";
           segment_ids[i].second = segment_ids[i + 1].second;
           segment_ids.erase(segment_ids.begin() + i + 1);
           --i;
@@ -694,6 +769,7 @@ namespace ego_planner
         else
         {
           ROS_ERROR_COND(VERBOSE_OUTPUT, "A-star error");
+          last_failure_reason_ = "astar_search_err";
           segment_ids.erase(segment_ids.begin() + i);
           --i;
         }
@@ -808,6 +884,10 @@ namespace ego_planner
           ROS_WARN_COND(VERBOSE_OUTPUT, "Failed to generate direction. It doesn't matter.");
       }
 
+      // P1-B: 记录 rebound 触发点 (含段数), 便于诊断 rebound 频率
+      ROS_DEBUG_NAMED("minco_force_stop",
+                      "STOP_FOR_REBOUND @ roughlyCheck: %zu collision segment(s)",
+                      segment_ids.size());
       force_stop_type_ = STOP_FOR_REBOUND;
       return true;
     }
@@ -1281,10 +1361,22 @@ namespace ego_planner
   template <typename EIGENVEC>
   void PolyTrajOptimizer::VirtualT2RealT(const EIGENVEC &VT, Eigen::VectorXd &RT)
   {
+    // Fix H2: Vt > V_MAX 区段改用 atan 软饶和, RT 硬上限 ≤ RT_MAX + SLOPE_MAX * V_WIDTH
+    // Fix H 原版线性外推 RT = 21*Vt 在 Vt=1e50 时 RT=2e51, 下游 T^4/T^6 仍会 inf
+    // atan 形式: Vt=V_MAX 值与一阶导连续, Vt→∞ 时 RT → 221+210 = 431
+    constexpr double V_MAX = 20.0;
+    constexpr double RT_MAX = (0.5 * V_MAX + 1.0) * V_MAX + 1.0; // = 221.0
+    constexpr double SLOPE_MAX = V_MAX + 1.0;                     // = 21.0
+    constexpr double V_WIDTH = 10.0;
+    constexpr double K_ATAN = M_PI / (2.0 * V_WIDTH);
     for (int i = 0; i < VT.size(); ++i)
     {
-      RT(i) = VT(i) > 0.0 ? ((0.5 * VT(i) + 1.0) * VT(i) + 1.0)
-                          : 1.0 / ((0.5 * VT(i) - 1.0) * VT(i) + 1.0);
+      if (VT(i) > V_MAX)
+        RT(i) = RT_MAX + (SLOPE_MAX / K_ATAN) * std::atan(K_ATAN * (VT(i) - V_MAX));
+      else if (VT(i) > 0.0)
+        RT(i) = ((0.5 * VT(i) + 1.0) * VT(i) + 1.0);
+      else
+        RT(i) = 1.0 / ((0.5 * VT(i) - 1.0) * VT(i) + 1.0);
     }
   }
 
@@ -1294,10 +1386,20 @@ namespace ego_planner
       const Eigen::VectorXd &gdRT, EIGENVECGD &gdVT,
       double &costT)
   {
+    // Fix H2: 与 atan 饶和配套, 导数 d(RT)/d(Vt) = SLOPE_MAX / (1 + (K_ATAN*(Vt-V_MAX))^2)
+    constexpr double V_MAX = 20.0;
+    constexpr double SLOPE_MAX = V_MAX + 1.0;
+    constexpr double V_WIDTH = 10.0;
+    constexpr double K_ATAN = M_PI / (2.0 * V_WIDTH);
     for (int i = 0; i < VT.size(); ++i)
     {
       double gdVT2Rt;
-      if (VT(i) > 0)
+      if (VT(i) > V_MAX)
+      {
+        double u = K_ATAN * (VT(i) - V_MAX);
+        gdVT2Rt = SLOPE_MAX / (1.0 + u * u);
+      }
+      else if (VT(i) > 0)
       {
         gdVT2Rt = VT(i) + 1.0;
       }
@@ -1577,9 +1679,22 @@ namespace ego_planner
 
     if (penalty > 0)
     {
-      // Quadratic penalty: cost = w · P²
-      costK = wei_curv_ * penalty * penalty;
-      double dJ_dP = 2.0 * wei_curv_ * penalty;
+      // === Huber 型分段惩罚: 防止 wei_curv 偏大或重 replan 边界处 |a|↑ 时
+      //     |grad| 直接爆到 1e8 量级、LBFGS 线搜索撞 ROUNDING_ERROR/COST_NAN ===
+      // penalty < THR: 平方惩罚 (灵敏)
+      // penalty ≥ THR: 线性惩罚, |dJ/dP| = 2·wei·THR 上界
+      const double THR = 0.3;
+      double dJ_dP;
+      if (penalty < THR)
+      {
+        costK = wei_curv_ * penalty * penalty;
+        dJ_dP = 2.0 * wei_curv_ * penalty;
+      }
+      else
+      {
+        costK = wei_curv_ * (THR * THR + 2.0 * THR * (penalty - THR));
+        dJ_dP = 2.0 * wei_curv_ * THR;
+      }
 
       Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
       Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);

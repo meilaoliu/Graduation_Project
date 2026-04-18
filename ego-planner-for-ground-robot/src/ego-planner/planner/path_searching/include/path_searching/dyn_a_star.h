@@ -9,6 +9,19 @@
 #include <queue>
 
 constexpr double inf = 1 >> 20;
+
+// P2-A: 恢复原版 ASTAR_RET 三态语义
+//   SUCCESS    : 找到路径
+//   INIT_ERR   : 起点或终点无效 (越界/被占据/数值发散)
+//   SEARCH_ERR : 扩展过程未能到达终点 (超时或穷尽)
+// 上层据此区分 "调整端点" 与 "丢弃段" 两种应对策略。
+enum class ASTAR_RET
+{
+    SUCCESS = 0,
+    INIT_ERR = 1,
+    SEARCH_ERR = 2,
+};
+
 struct GridNode;
 typedef GridNode *GridNodePtr;
 
@@ -86,7 +99,12 @@ public:
 
 	void initGridMap(GridMap::Ptr occ_map, const Eigen::Vector2i pool_size);
 
-	bool AstarSearch(const double step_size, Eigen::Vector2d start_pt, Eigen::Vector2d end_pt,bool is_adjust=true);
+	// P2-A: 返回 ASTAR_RET 替代 bool。旧 bool 接口仍以包装形式保留。
+	ASTAR_RET AstarSearchTyped(const double step_size, Eigen::Vector2d start_pt, Eigen::Vector2d end_pt, bool is_adjust = true);
+	bool AstarSearch(const double step_size, Eigen::Vector2d start_pt, Eigen::Vector2d end_pt, bool is_adjust = true)
+	{
+		return AstarSearchTyped(step_size, start_pt, end_pt, is_adjust) == ASTAR_RET::SUCCESS;
+	}
 
 	std::vector<Eigen::Vector3d> getPath();
 };

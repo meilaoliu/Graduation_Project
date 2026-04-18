@@ -880,6 +880,8 @@ namespace ego_planner
                 {
                     ROS_WARN("WARN! terminal point of the current trajectory is in obstacle, skip this planning.");
 
+                    // P1-B: 记录 force_stop 触发点
+                    ROS_DEBUG_NAMED("bspline_force_stop", "STOP_FOR_ERROR @ check_collision_and_rebound: terminal-in-obstacle");
                     force_stop_type_ = STOP_FOR_ERROR;
                     return false;
                 }
@@ -1002,6 +1004,10 @@ namespace ego_planner
                     ROS_WARN("Failed to generate direction. It doesn't matter.");
             }
 
+            // P1-B: 记录 rebound 触发点 (含段数)
+            ROS_DEBUG_NAMED("bspline_force_stop",
+                            "STOP_FOR_REBOUND @ check_collision_and_rebound: %zu collision segment(s)",
+                            segment_ids.size());
             force_stop_type_ = STOP_FOR_REBOUND;
             return true;
         }

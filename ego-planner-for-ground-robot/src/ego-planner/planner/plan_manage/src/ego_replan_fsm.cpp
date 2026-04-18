@@ -164,7 +164,25 @@ namespace ego_planner
       if (exec_state_ == WAIT_TARGET)
         changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
       else if (exec_state_ == EXEC_TRAJ)
-        changeFSMExecState(REPLAN_TRAJ, "TRIG");
+      {
+        // 修复 B: 同 goal_callback, 大航向偏差时改走 GEN_NEW_TRAJ 触发 ADJUST_POSE
+        double target_dir = std::atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
+        double angle_diff = target_dir - yaw;
+        while (angle_diff > PI) angle_diff -= 2 * PI;
+        while (angle_diff < -PI) angle_diff += 2 * PI;
+        const double yaw_thresh = forward_only_ ? (PI / 2.0) : (2.0 * PI / 3.0);
+        if (std::abs(angle_diff) > yaw_thresh)
+        {
+          ROS_WARN("[waypointCallback] Large heading offset (%.1f deg), stop and replan from rest",
+                   std::abs(angle_diff) * 180.0 / PI);
+          callEmergencyStop(odom_pos_);
+          changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+        }
+        else
+        {
+          changeFSMExecState(REPLAN_TRAJ, "TRIG");
+        }
+      }
 
       // visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(1, 0, 0, 1), 0.3, 0);
       visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
@@ -234,8 +252,28 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             }
             else
             {
-                // 允许倒车模式：直接进入重规划，planFromCurrentTraj 会处理方向切换
-            changeFSMExecState(REPLAN_TRAJ, "TRIG");
+                // 允许倒车模式: 默认走 REPLAN_TRAJ; 但若新目标方向相对当前航向偏差过大,
+                // planFromCurrentTraj 出来的拼接弧会过于扭曲, 出现"画大圆"而不是停下转向。
+                // === 修复 B: 与 forward_only 一致, 大偏差时强制 EmergencyStop + GEN_NEW_TRAJ,
+                // 让 GEN_NEW_TRAJ 内部的 yaw_error 检查触发 ADJUST_POSE 原地转向。
+                double current_heading = yaw;
+                double target_dir = atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
+                double angle_diff = target_dir - current_heading;
+                while (angle_diff > PI) angle_diff -= 2 * PI;
+                while (angle_diff < -PI) angle_diff += 2 * PI;
+                // 倒车模式下偏差超过 ~120deg (大于 PI/2 + 缓冲) 时, 即便允许倒车,
+                // 直接拼弧也很难走通; 此时停车并走 GEN_NEW_TRAJ 让 ADJUST_POSE 介入
+                if (std::abs(angle_diff) > 2.0 * PI / 3.0)
+                {
+                    ROS_WARN("[goal_callback] Large heading offset (%.1f deg), stop and replan from rest",
+                             std::abs(angle_diff) * 180.0 / PI);
+                    callEmergencyStop(odom_pos_);
+                    changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+                }
+                else
+                {
+                    changeFSMExecState(REPLAN_TRAJ, "TRIG");
+                }
             }
             is_target_receive = true;
         }
@@ -373,10 +411,10 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     case ADJUST_POSE:
     {
-        // forward_only 模式下，必须等待车辆完全停止后才能开始原地转向
-        // 否则会边转边移动，导致偏离当前位置
+        // Fix I: 不论 forward_only 与否, 进入 ADJUST_POSE 必须先等线速度趋零再开始转向
+        // 否则倒车模式下会边滑边转, 表现为"画圈"
         double linear_speed = odom_vel_.head<2>().norm();  // 计算2D平面线速度
-        if (forward_only_ && linear_speed > 0.1)  // 如果线速度 > 0.1 m/s，继续等待
+        if (linear_speed > 0.05)  // 阈值 0.05 m/s, 比 0.1 严
         {
             // 发送停止命令
             cmd_vel.linear.x = 0;
@@ -433,8 +471,21 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     case GEN_NEW_TRAJ:
     {
       start_pt_ = odom_pos_;
-      // 初速度设为零，让 planner_manager 的 computeInitState 统一处理方向逻辑
-      start_vel_.setZero();
+      // P0-B: 不再硬清零 start_vel_。MINCO finelyCheck 在 |v|≈0 时
+      // 会让承载点的曲率/碰撞段判断失真，进而把 NaN 端点喂给 A*，
+      // 触发大量 reason=max_restarts 与 EMERGENCY_STOP。
+      // 仅在车辆基本静止时才清零；否则保留沿当前航向的速度分量。
+      double v_norm = odom_vel_.head<2>().norm();
+      if (v_norm < 0.05)
+      {
+        start_vel_.setZero();
+      }
+      else
+      {
+        Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block<3, 1>(0, 0);
+        double yaw = atan2(rot_x(1), rot_x(0));
+        start_vel_ << v_norm * std::cos(yaw), v_norm * std::sin(yaw), 0.0;
+      }
       start_acc_.setZero();
 
       // Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block(0, 0, 3, 1);
@@ -447,9 +498,26 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       else
         flag_random_poly_init = true;
 
-      bool success = callReboundReplan(true, flag_random_poly_init);
+      // P2-B: 对齐原版 planFromGlobalTraj(10) — 单次失败不立即跳走,
+      // 在同一帧内最多重试 10 次, 第 1 次用确定多项式初始化, 后续启用随机扰动
+      // 以跨越 max_restarts/反弹卡死的局部坑。避免 FSM 重入延迟把短暂失败
+      // 误升级为 EMERGENCY_STOP。
+      bool success = false;
+      for (int i = 0; i < 10; ++i)
+      {
+        bool flag_random = flag_random_poly_init || (i > 0);
+        if (callReboundReplan(true, flag_random))
+        {
+          success = true;
+          if (i > 0)
+            ROS_INFO("[FSM] GEN_NEW_TRAJ succeeded after %d retries", i);
+          break;
+        }
+      }
       if (success)
       {
+          // Fix G: 成功一次 → 重置 stuck 计数
+          consecutive_init_collision_count_ = 0;
           // 根据轨迹类型获取速度
           Eigen::Vector3d vel_start;
           auto info = &planner_manager_->local_data_;
@@ -521,7 +589,37 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
       else
       {
-        changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+        // Fix G: 检测连续 init_collision_dense 卡死
+        const std::string &g_reason = planner_manager_->getMincoLastFailureReason();
+        if (g_reason == "init_collision_dense")
+          consecutive_init_collision_count_++;
+        else
+          consecutive_init_collision_count_ = 0;
+
+        if (consecutive_init_collision_count_ >= 20)
+        {
+          ROS_ERROR("[FSM Fix G] %d consecutive init_collision_dense in GEN_NEW_TRAJ, goal unreachable",
+                    consecutive_init_collision_count_);
+          callEmergencyStop(odom_pos_);
+          have_target_ = false;
+          consecutive_init_collision_count_ = 0;
+          changeFSMExecState(WAIT_TARGET, "FSM_FixG");
+        }
+        else if (consecutive_init_collision_count_ >= 5)
+        {
+          ROS_WARN("[FSM Fix G] %d consecutive init_collision_dense, emergency stop + replan global",
+                   consecutive_init_collision_count_);
+          callEmergencyStop(odom_pos_);
+          // 用当前位置重做全局 poly: 让 last_progress_time_=0 重新挑局部目标
+          planner_manager_->planGlobalTraj(odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                                            end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+          consecutive_init_collision_count_ = 0;
+          changeFSMExecState(GEN_NEW_TRAJ, "FSM_FixG");
+        }
+        else
+        {
+          changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+        }
       }
       break;
     }
@@ -531,6 +629,8 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
       if (planFromCurrentTraj())
       {
+          // Fix G: 成功一次 → 重置 stuck 计数
+          consecutive_init_collision_count_ = 0;
           // 根据轨迹类型获取速度
           Eigen::Vector3d vel_start;
           auto info = &planner_manager_->local_data_;
@@ -561,9 +661,33 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
       else
       {
-          // planFromCurrentTraj()可能已经将状态改为ADJUST_POSE
-          // 只有当状态仍是REPLAN_TRAJ时才重试
-          if (exec_state_ == REPLAN_TRAJ)
+          // Fix G: REPLAN_TRAJ 失败也走 stuck 检测
+          const std::string &g_reason2 = planner_manager_->getMincoLastFailureReason();
+          if (g_reason2 == "init_collision_dense")
+            consecutive_init_collision_count_++;
+          else
+            consecutive_init_collision_count_ = 0;
+
+          if (consecutive_init_collision_count_ >= 20)
+          {
+            ROS_ERROR("[FSM Fix G] %d consecutive init_collision_dense in REPLAN_TRAJ, goal unreachable",
+                      consecutive_init_collision_count_);
+            callEmergencyStop(odom_pos_);
+            have_target_ = false;
+            consecutive_init_collision_count_ = 0;
+            changeFSMExecState(WAIT_TARGET, "FSM_FixG");
+          }
+          else if (consecutive_init_collision_count_ >= 5)
+          {
+            ROS_WARN("[FSM Fix G] %d consecutive init_collision_dense (REPLAN), emergency stop + replan global",
+                     consecutive_init_collision_count_);
+            callEmergencyStop(odom_pos_);
+            planner_manager_->planGlobalTraj(odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                                              end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+            consecutive_init_collision_count_ = 0;
+            changeFSMExecState(GEN_NEW_TRAJ, "FSM_FixG");
+          }
+          else if (exec_state_ == REPLAN_TRAJ)
           {
               changeFSMExecState(REPLAN_TRAJ, "FSM");
           }
@@ -929,7 +1053,9 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     local_target_vel_(2) = 0;
 
     bool plan_success =
-        planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
+        planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_,
+                                        (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj,
+                                        touch_goal_); // P2-C: 显式传 touch_goal
     have_new_target_ = false;
 
     cout << "final_plan_success=" << plan_success << endl;
@@ -1007,6 +1133,9 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;
     double dist_min = 9999, dist_min_t = 0.0;
+
+    // P2-C: 每次进入先复位 touch_goal_, 由后续逻辑显式置位
+    touch_goal_ = false;
     
     // 保存上一次的局部目标时间戳（用于 MINCO 初始化）
     planner_manager_->global_data_.last_glb_t_of_lc_tgt_ = planner_manager_->global_data_.glb_t_of_lc_tgt_;
@@ -1045,6 +1174,8 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       local_target_pt_ = end_pt_;
       // 更新为全局轨迹终点时间
       planner_manager_->global_data_.glb_t_of_lc_tgt_ = planner_manager_->global_data_.global_start_time_.toSec() + planner_manager_->global_data_.global_duration_;
+      // P2-C: 已经把局部目标推到全局终点, 显式置 touch_goal_
+      touch_goal_ = true;
     }
 
     if ((end_pt_ - local_target_pt_).norm() < (planner_manager_->pp_.max_vel_ * planner_manager_->pp_.max_vel_) / (2 * planner_manager_->pp_.max_acc_))
@@ -1052,12 +1183,18 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       // local_target_vel_ = (end_pt_ - init_pt_).normalized() * planner_manager_->pp_.max_vel_ * (( end_pt_ - local_target_pt_ ).norm() / ((planner_manager_->pp_.max_vel_*planner_manager_->pp_.max_vel_)/(2*planner_manager_->pp_.max_acc_)));
       // cout << "A" << endl;
       local_target_vel_ = Eigen::Vector3d::Zero();
+      // P2-C: 距离全局终点小于刹车距离 -> 视为 touch_goal, 末态零速
+      touch_goal_ = true;
     }
     else
     {
       local_target_vel_ = planner_manager_->global_data_.getVelocity(t);
       // cout << "AA" << endl;
     }
+
+    // (Fix A 已回退: 经验证沿全局轨迹回溯/侧向扫描在 substation 高密度场景中
+    //  收益甚微 [0/30], 且会让 last_failure_reason_ 标签更乱。
+    //  保持原 ego-planner 行为, "Local target in collision" 由 roughlyCheck 处理。)
   }
 
   void EGOReplanFSM::publishBspline() {

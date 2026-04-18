@@ -299,7 +299,7 @@ bool AStar::ConvertToIndexAndAdjustStartEndPointsReverse(Eigen::Vector2d start_p
 //    return false;
 //}
 
-bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_pt,bool is_adjust)
+ASTAR_RET AStar::AstarSearchTyped(const double step_size, Vector2d start_pt, Vector2d end_pt, bool is_adjust)
 {
     ros::Time time_1 = ros::Time::now();
     ++rounds_;
@@ -319,7 +319,7 @@ bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_
         if (!ConvertToIndexAndAdjustStartEndPoints(start_pt, end_pt, start_idx, end_idx))
         {
             ROS_ERROR("Unable to handle the initial or end point, force return!");
-            return false;
+            return ASTAR_RET::INIT_ERR;
         }
     }
     else
@@ -327,7 +327,7 @@ bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_
         if (!ConvertToIndexAndAdjustStartEndPointsReverse(start_pt, end_pt, start_idx, end_idx))
         {
             ROS_ERROR("Unable to handle the initial or end point, force return!");
-            return false;
+            return ASTAR_RET::INIT_ERR;
         }
     }
 
@@ -377,7 +377,7 @@ bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_
             // if((time_2 - time_1).toSec() > 0.1)
             //     ROS_WARN("Time consume in A star path finding is %f", (time_2 - time_1).toSec() );
             gridPath_ = retrievePath(current);
-            return true;
+            return ASTAR_RET::SUCCESS;
         }
         current->state = GridNode::CLOSEDSET; //move current node from open set to closed set.
 
@@ -436,7 +436,7 @@ bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_
         if ((time_2 - time_1).toSec() > 0.05)
         {
             ROS_WARN("Failed in A star path searching !!! 0.2 seconds time limit exceeded.");
-            return false;
+            return ASTAR_RET::SEARCH_ERR;
         }
     }
     //ROS_WARN("Failed in A star path searching !!! No path found.");
@@ -445,7 +445,7 @@ bool AStar::AstarSearch(const double step_size, Vector2d start_pt, Vector2d end_
     if ((time_2 - time_1).toSec() > 0.1)
         ROS_WARN("Time consume in A star path finding is %.3fs, iter=%d", (time_2 - time_1).toSec(), num_iter);
 
-    return false;
+    return ASTAR_RET::SEARCH_ERR;
 }
 
 vector<Vector3d> AStar::getPath()

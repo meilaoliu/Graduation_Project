@@ -144,18 +144,27 @@ namespace ego_planner
         visualization_ = vis;
     }
 
+    // Fix G: passthrough, FSM 用来侦测连续 init_collision_dense
+    std::string EGOPlannerManager::getMincoLastFailureReason() const
+    {
+        if (minco_optimizer_)
+            return minco_optimizer_->getLastFailureReason();
+        return "";
+    }
+
     // !SECTION
 
     // SECTION rebond replanning
 
     bool EGOPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
                                           Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
-                                          Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+                                          Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                                          bool touch_goal)
     {
         // 如果使用 MINCO，调用 MINCO 重规划
         if (use_minco_)
         {
-            return reboundReplanMinco(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, flag_polyInit, flag_randomPolyTraj);
+            return reboundReplanMinco(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, flag_polyInit, flag_randomPolyTraj, touch_goal);
         }
 
         static int count = 0;
@@ -621,7 +630,8 @@ namespace ego_planner
     }
 
     bool EGOPlannerManager::reboundReplanMinco(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                                               Eigen::Vector3d local_target_pt, Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+                                               Eigen::Vector3d local_target_pt, Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                                               bool touch_goal)
     {
         ros::Time t_start = ros::Time::now();
         ros::Duration t_init, t_opt;
@@ -630,7 +640,9 @@ namespace ego_planner
         cout << "\033[47;30m\n[" << t_start << "] Replan Minco " << count++ << "\033[0m" << endl;
 
         /*** STEP 1: INIT ***/
-        minco_optimizer_->setIfTouchGoal(global_data_.localTrajReachTarget()); // Approximate check
+        // P2-C: 优先使用上层推算的 touch_goal; 其仅在初始未设置时才起作用。
+        const bool effective_touch_goal = touch_goal || global_data_.localTrajReachTarget();
+        minco_optimizer_->setIfTouchGoal(effective_touch_goal);
         double ts = pp_.polyTraj_piece_length / pp_.max_vel_;
 
         poly_traj::MinJerkOpt initMJO;
@@ -752,7 +764,7 @@ namespace ego_planner
             printf("Time:\033[42m%.3fms,\033[0m init:%.3fms, optimize:%.3fms, avg=%.3fms\n",
                    (t_init + t_opt).toSec() * 1000, t_init.toSec() * 1000, t_opt.toSec() * 1000, sum_time / count_success * 1000);
 
-            bool local_traj_ok = setLocalTrajFromOpt(best_MJO, global_data_.localTrajReachTarget());
+            bool local_traj_ok = setLocalTrajFromOpt(best_MJO, effective_touch_goal);
             cstr_pts = best_MJO.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
             if (local_traj_ok)
             {
