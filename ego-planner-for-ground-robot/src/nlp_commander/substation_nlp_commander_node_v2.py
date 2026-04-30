@@ -8,6 +8,10 @@
 import rospy
 import sys
 import os
+import queue
+import threading
+
+from std_msgs.msg import String
 
 # 确保从包目录加载本地 utils 模块
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,16 +36,40 @@ class SubstationNlpCommanderV2:
             on_waypoint_reached=self.on_waypoint_reached,
             on_task_completed=self.on_task_completed
         )
+
+        # 聊天通道：与 Web Dashboard / 其他外部 UI 双向交互
+        self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._chat_out_pub = rospy.Publisher('/chat_out', String, queue_size=20)
+        rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
         
         rospy.loginfo("变电站智能巡检指挥官 V2.0 已就绪")
+
+    # ------------------------- 聊天通道 -------------------------
+    def _chat_in_cb(self, msg: String):
+        """来自 /chat_in (例如 Web Dashboard 用户输入) 的指令。"""
+        text = (msg.data or "").strip()
+        if not text:
+            return
+        rospy.loginfo(f"[chat_in] {text}")
+        self._cmd_queue.put(('chat', text))
+
+    def _say(self, text: str):
+        """同时输出到终端与 /chat_out，供外部 UI 显示。"""
+        if text is None:
+            return
+        print(text)
+        try:
+            self._chat_out_pub.publish(String(data=str(text)))
+        except Exception:
+            pass
     
     def on_waypoint_reached(self, waypoint_name: str):
         """航点到达回调"""
-        print(f"✅ 已到达设备点: {waypoint_name}")
+        self._say(f"✅ 已到达设备点: {waypoint_name}")
     
     def on_task_completed(self):
         """任务完成回调"""
-        print("🎉 巡检任务完成！准备接收新指令...")
+        self._say("🎉 巡检任务完成！准备接收新指令...")
     
     def handle_navigation_request(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> str:
         """
@@ -342,60 +370,81 @@ class SubstationNlpCommanderV2:
         print("🗺️ 变电站拓扑图结构:")
         print(self.path_planner.graph.visualize_graph())
     
-    def run(self):
-        """运行主循环"""
-        self.show_help()
-        
+    def _stdin_reader(self):
+        """后台线程：把 stdin 输入塞入命令队列。"""
         while not rospy.is_shutdown():
             try:
-                # 显示当前状态
-                status = self.waypoint_manager.get_current_status()
-                print(f"\n📍 当前位置: {status['current_position']}")
-                
-                # 获取用户输入
-                print("🎯 请输入巡检指令 > ", end="", flush=True)
-                command = input().strip()
-                
-                if not command:
-                    continue
-                
-                # 处理内置命令
-                if command.lower() == 'help':
-                    self.show_help()
-                    continue
-                elif command.lower() == 'status':
-                    self.show_status()
-                    continue
-                elif command.lower() == 'graph':
-                    self.show_graph_info()
-                    continue
-                elif command.lower() == 'stop':
-                    result = self.waypoint_manager.stop_current_task()
-                    print(f"📋 {result}")
-                    continue
-                elif command.lower() == 'pause':
-                    result = self.waypoint_manager.pause_current_task()
-                    print(f"📋 {result}")
-                    continue
-                elif command.lower() == 'resume':
-                    result = self.waypoint_manager.resume_current_task()
-                    print(f"📋 {result}")
-                    continue
-                
-                # 使用LLM处理巡检指令
-                print("🔄 正在分析指令并规划路径...")
-                response = self.process_command_with_llm(command)
-                print(f"📋 {response}")
-                
+                # 提示符仍打印到终端，避免 dashboard-only 用户被打扰
+                print("\n🎯 请输入巡检指令 > ", end="", flush=True)
+                line = input()
+            except (EOFError, KeyboardInterrupt):
+                self._cmd_queue.put(('stdin', '__EOF__'))
+                return
+            self._cmd_queue.put(('stdin', line.strip()))
+
+    def _process_command(self, command: str, source: str = 'stdin'):
+        """处理一条指令（来自 stdin 或 /chat_in）。"""
+        if not command:
+            return
+        if source == 'chat':
+            self._say(f"📥 [chat] {command}")
+
+        low = command.lower()
+        if low == 'help':
+            self.show_help()
+            return
+        if low == 'status':
+            self.show_status()
+            return
+        if low == 'graph':
+            self.show_graph_info()
+            return
+        if low == 'stop':
+            result = self.waypoint_manager.stop_current_task()
+            self._say(f"📋 {result}")
+            return
+        if low == 'pause':
+            result = self.waypoint_manager.pause_current_task()
+            self._say(f"📋 {result}")
+            return
+        if low == 'resume':
+            result = self.waypoint_manager.resume_current_task()
+            self._say(f"📋 {result}")
+            return
+
+        self._say("🔄 正在分析指令并规划路径...")
+        try:
+            response = self.process_command_with_llm(command)
+        except Exception as e:
+            response = f"❌ LLM 处理异常: {e}"
+            rospy.logerr(response)
+        self._say(f"📋 {response}")
+
+    def run(self):
+        """运行主循环（消费 stdin 与 /chat_in 两路指令）。"""
+        self.show_help()
+
+        stdin_thread = threading.Thread(target=self._stdin_reader, daemon=True)
+        stdin_thread.start()
+
+        while not rospy.is_shutdown():
+            try:
+                source, command = self._cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if command == '__EOF__':
+                rospy.loginfo("🔴 stdin 关闭，仅保留 /chat_in 通道")
+                continue
+
+            try:
+                self._process_command(command, source=source)
             except (rospy.ROSInterruptException, KeyboardInterrupt):
                 rospy.loginfo("🔴 用户终止，关闭巡检系统")
                 break
-            except EOFError:
-                rospy.loginfo("🔴 输入结束，关闭巡检系统")
-                break
             except Exception as e:
-                rospy.logerr(f"输入处理错误: {e}")
-                print("❌ 输入错误，请重试...")
+                rospy.logerr(f"指令处理错误: {e}")
+                self._say(f"❌ 指令处理出错: {e}")
 
 def main():
     """主函数"""
