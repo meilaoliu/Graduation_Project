@@ -50,6 +50,7 @@ class BatteryMonitor:
         self.update_rate_hz = float(rospy.get_param('~update_rate_hz', 10.0))
         self.publish_rate_hz = float(rospy.get_param('~publish_rate_hz', 1.0))
         self.odom_topic = rospy.get_param('~odom_topic', '/odom_adjust')
+        self.nominal_v = float(rospy.get_param('~nominal_v', 1.0))         # 静止时估算续航的标称速度
 
         self.pct = self.initial_pct
         self.charging = False
@@ -116,8 +117,10 @@ class BatteryMonitor:
             v = self.last_v
 
         # 估算剩余里程：稳态线速度下，drain ≈ (base + k_v*v) * (d / v)
-        if v > 0.05:
-            drain_per_m = self.base_rate / v + self.k_v
+        # v 太小（停车时）退回到一个标称巡航速度 nominal_v，让 UI 始终能看到一个合理估计
+        v_eff = v if v > 0.05 else self.nominal_v
+        if v_eff > 1e-3:
+            drain_per_m = self.base_rate / v_eff + self.k_v
             remain = pct / max(drain_per_m, 1e-6)
         else:
             remain = float('nan')
