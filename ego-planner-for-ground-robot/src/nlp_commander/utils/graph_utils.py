@@ -264,7 +264,26 @@ class SubstationGraph:
     def get_all_locations(self) -> Dict[str, Tuple[float, float]]:
         """获取所有设备点"""
         return self.locations.copy()
-    
+
+    def get_charge_point(self, charge_point_name: Optional[str] = None) -> Tuple[str, float, float]:
+        """
+        获取充电点信息。
+
+        Args:
+            charge_point_name: 可选，指定充电点的节点名；为 None 则使用默认 "入口点"。
+                后续若新增独立充电点节点（如 "充电点"），传入该名即可，无需改其他代码。
+
+        Returns:
+            (name, x, y) 三元组。若指定名不存在则回退到 "入口点"。
+        """
+        name = charge_point_name or "入口点"
+        coords = self.locations.get(name)
+        if coords is None:
+            # 回退到入口点
+            name = "入口点"
+            coords = self.locations.get(name, (0.0, 0.0))
+        return name, coords[0], coords[1]
+
     def visualize_graph(self) -> str:
         """可视化图结构（文本形式）"""
         result = "变电站设备连接图:\n"
