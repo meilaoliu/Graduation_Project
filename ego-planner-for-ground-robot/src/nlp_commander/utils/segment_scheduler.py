@@ -145,7 +145,35 @@ class SegmentScheduler:
             self._segments = []
             self._task_active = False
         self._segment_done_evt.set()
+        # 主动给 FSM 发一个"原地"目标，打断当前正在执行的轨迹
+        self._publish_halt_path()
         return "🛑 已请求停止当前任务"
+
+    def _publish_halt_path(self):
+        """发布一条单点 Path 指向当前 odom 位置，让 FSM 把目标切到原地。"""
+        cur = self.get_current_xy() or self._cur_xy_from_odom
+        if cur is None:
+            rospy.logwarn("[scheduler] no odom yet, cannot publish halt path")
+            return
+        path = Path()
+        path.header = Header(stamp=rospy.Time.now(), frame_id=self.frame_id)
+        # 用一个新的、远超已知 seq 的 id，避免和后续真实段冲突
+        with self._lock:
+            self._next_seg_id += 1
+            path.header.seq = self._next_seg_id
+        ps = PoseStamped()
+        ps.header = path.header
+        ps.pose.position.x = cur[0]
+        ps.pose.position.y = cur[1]
+        ps.pose.position.z = self.waypoint_z
+        ps.pose.orientation.w = 1.0
+        path.poses.append(ps)
+        try:
+            self.gwp_pub.publish(path)
+            rospy.loginfo(f"[scheduler] published HALT path seq={path.header.seq} "
+                          f"at ({cur[0]:.2f},{cur[1]:.2f})")
+        except Exception as e:
+            rospy.logwarn(f"[scheduler] halt publish failed: {e}")
 
     def is_active(self) -> bool:
         with self._lock:

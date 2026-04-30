@@ -415,30 +415,41 @@ class SubstationNlpCommanderV2:
         if source == 'chat':
             self._say(f"📥 [chat] {command}")
 
-        low = command.lower()
-        if low == 'help':
+        low = command.lower().strip()
+        # 中英文同义词映射 (子串匹配，让 "停止巡检"/"暂停一下" 也能命中)
+        STOP_KWS    = ('stop', '停止', '停下', '停车', '中止', '取消任务')
+        PAUSE_KWS   = ('pause', '暂停')
+        RESUME_KWS  = ('resume', '继续', '恢复')
+        HELP_KWS    = ('help', '帮助', '?', '？')
+        STATUS_KWS  = ('status', '状态', '当前状态')
+        GRAPH_KWS   = ('graph', '地图', '查看地图')
+
+        def _hit(kws):
+            return any(k in low for k in kws)
+
+        if _hit(HELP_KWS):
             self.show_help()
             return
-        if low == 'status':
+        if _hit(STATUS_KWS):
             self.show_status()
             if self.segment_scheduler is not None:
                 self._say(f"🔧 调度器状态: {self.segment_scheduler.status()}")
             return
-        if low == 'graph':
+        if _hit(GRAPH_KWS):
             self.show_graph_info()
             return
-        if low == 'stop':
+        if _hit(STOP_KWS):
             if self.segment_scheduler is not None and self.segment_scheduler.is_active():
                 result = self.segment_scheduler.stop_task()
             else:
                 result = self.waypoint_manager.stop_current_task()
             self._say(f"📋 {result}")
             return
-        if low == 'pause':
+        if _hit(PAUSE_KWS):
             result = self.waypoint_manager.pause_current_task()
             self._say(f"📋 {result}")
             return
-        if low == 'resume':
+        if _hit(RESUME_KWS):
             result = self.waypoint_manager.resume_current_task()
             self._say(f"📋 {result}")
             return
