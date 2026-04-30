@@ -42,28 +42,35 @@ class PathPlanner:
         Returns:
             匹配的航点名称、航点列表或None
         """
-        requested_lower = requested_name.lower()
+        requested_lower = requested_name.lower().replace(" ", "")
         
         # 直接匹配
         if requested_name in self.graph.locations:
             return requested_name
         
-        # 模糊匹配规则
+        requested_index = self._extract_requested_index(requested_lower)
+
+        # 带编号的请求优先匹配单个设备，避免“35kV配电箱2”被扩展成整个35kV区域
+        if requested_index:
+            for keyword, waypoints in self.device_groups.items():
+                if keyword in requested_lower:
+                    for wp in waypoints:
+                        if self._extract_requested_index(wp.lower()) == requested_index:
+                            return wp
+
+        # 区域关键字匹配
         for keyword, waypoints in self.device_groups.items():
             if keyword in requested_lower:
                 return waypoints  # 返回整个组
         
-        # 单独数字匹配
-        number_match = re.search(r'(\d+)', requested_name)
-        if number_match:
-            number = number_match.group(1)
-            for keyword, waypoints in self.device_groups.items():
-                if keyword in requested_lower:
-                    for wp in waypoints:
-                        if number in wp:
-                            return wp
-        
         return None
+
+    def _extract_requested_index(self, name: str) -> Optional[str]:
+        """提取设备编号，排除 35kV 中的电压等级数字。"""
+        normalized = name.lower().replace(" ", "")
+        normalized = re.sub(r"35\s*k?v", "", normalized)
+        numbers = re.findall(r"\d+", normalized)
+        return numbers[-1] if numbers else None
     
     def plan_path_to_single_target(self, current_pos: str, target: str) -> List[str]:
         """
@@ -86,7 +93,11 @@ class PathPlanner:
     
     def plan_multi_target_path(self, current_pos: str, targets: List[str]) -> List[str]:
         """
-        规划到多个目标的路径，使用区域优化算法避免重复路径
+        规划到多个目标的路径。
+
+        对无显式顺序的目标集合，采用论文中描述的基于 Dijkstra 最短路代价的
+        贪心策略：每一步选择从当前位置出发代价最小的尚未访问目标，并将相邻
+        目标之间的最短路径拼接成全局 Waypoint 序列。
         
         Args:
             current_pos: 当前位置名称
@@ -95,58 +106,77 @@ class PathPlanner:
         Returns:
             完整路径点列表
         """
-        if not targets:
+        valid_targets = self._deduplicate_valid_targets(targets)
+        if not valid_targets:
             return []
-        
-        # 如果只有一个目标，直接计算路径
-        if len(targets) == 1:
-            return self.plan_path_to_single_target(current_pos, targets[0])
-        
-        # 简化的多目标路径规划
-        # 按区域对目标进行分组
-        grouped_targets = self._group_targets_by_region(targets)
-        
-        # 规划最优区域访问顺序
-        region_order = self._plan_region_visit_order(current_pos, grouped_targets)
-        
-        # 构建最终路径
+
+        if len(valid_targets) == 1:
+            return self.plan_path_to_single_target(current_pos, valid_targets[0])
+
+        remaining = valid_targets[:]
         final_path = []
         current_location = current_pos
-        
-        for region_name in region_order:
-            region_targets = grouped_targets[region_name]
-            if not region_targets:
-                continue
-                
-            # 对区域内目标进行排序
-            sorted_region_targets = self._sort_targets_by_logical_order(region_targets)
-            
-            # 为区域选择最佳起点
-            if current_location in sorted_region_targets:
-                # 当前位置就在目标中，从当前位置开始按顺序访问
-                start_index = sorted_region_targets.index(current_location)
-                region_path = self._create_complete_region_path(sorted_region_targets, start_index)
-            else:
-                # 当前位置不在目标中，需要先到达区域，然后完整访问
-                closest_target = self._find_closest_target(current_location, sorted_region_targets)
-                path_to_region = self.plan_path_to_single_target(current_location, closest_target)
-                
-                # 从最近目标开始的完整区域路径
-                start_index = sorted_region_targets.index(closest_target)
-                region_internal_path = self._create_complete_region_path(sorted_region_targets, start_index)
-                
-                # 合并路径
-                region_path = path_to_region + region_internal_path[1:]  # 跳过重复的起点
-            
-            # 添加到最终路径
-            if final_path:
-                # 跳过重复的起点
-                region_path = region_path[1:] if region_path and region_path[0] == final_path[-1] else region_path
-            
-            final_path.extend(region_path)
-            current_location = region_path[-1] if region_path else current_location
-        
+
+        while remaining:
+            best_target = None
+            best_path = []
+            best_distance = float('inf')
+
+            for target in remaining:
+                candidate_path = self.plan_path_to_single_target(current_location, target)
+                if not candidate_path:
+                    continue
+                candidate_distance = self.get_path_distance(candidate_path)
+                if candidate_distance < best_distance:
+                    best_target = target
+                    best_path = candidate_path
+                    best_distance = candidate_distance
+
+            if best_target is None:
+                return []
+
+            self._append_segment(final_path, best_path)
+            current_location = best_target
+            remaining.remove(best_target)
+
         return final_path
+
+    def plan_ordered_targets_path(self, current_pos: str, targets: List[str]) -> List[str]:
+        """按用户或大模型给定的显式顺序访问目标，并用 Dijkstra 补全中间路径。"""
+        ordered_targets = self._deduplicate_valid_targets(targets)
+        if not ordered_targets:
+            return []
+
+        final_path = []
+        current_location = current_pos
+
+        for target in ordered_targets:
+            segment = self.plan_path_to_single_target(current_location, target)
+            if not segment:
+                return []
+            self._append_segment(final_path, segment)
+            current_location = target
+
+        return final_path
+
+    def _deduplicate_valid_targets(self, targets: List[str]) -> List[str]:
+        """过滤未知目标并按首次出现顺序去重。"""
+        result = []
+        seen = set()
+        for target in targets:
+            if target in self.graph.locations and target not in seen:
+                result.append(target)
+                seen.add(target)
+        return result
+
+    def _append_segment(self, final_path: List[str], segment: List[str]):
+        """拼接两段路径，自动去除首尾重复节点。"""
+        if not segment:
+            return
+        if final_path and final_path[-1] == segment[0]:
+            final_path.extend(segment[1:])
+        else:
+            final_path.extend(segment)
     
     def _create_complete_region_path(self, sorted_targets: List[str], start_index: int) -> List[str]:
         """创建完整的区域访问路径，确保访问所有目标"""

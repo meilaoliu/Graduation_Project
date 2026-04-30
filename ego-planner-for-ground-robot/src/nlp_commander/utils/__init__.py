@@ -6,7 +6,11 @@
 from .graph_utils import SubstationGraph
 from .llm_utils import LLMClient
 from .path_planner import PathPlanner
-from .waypoint_manager import WaypointManager
+
+try:
+    from .waypoint_manager import WaypointManager
+except ImportError:
+    WaypointManager = None
 
 __all__ = [
     'SubstationGraph',

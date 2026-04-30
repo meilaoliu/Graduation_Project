@@ -12,7 +12,7 @@ import os
 import heapq
 from typing import Dict, List, Tuple, Optional
 
-from .osm_map_loader import load_locations_from_osm
+from .osm_map_loader import load_graph_from_osm
 
 class Vertex:
     """顶点类"""
@@ -41,11 +41,12 @@ class SubstationGraph:
         """
         # 变电站设备坐标
         self.locations: Dict[str, Tuple[float, float]] = {}
+        self.osm_edges: List[Tuple[str, str]] = []
 
         # 优先尝试从 OSM 文件加载
         osm_candidate = osm_path or "maps/substation.osm"
         try:
-            self.locations = load_locations_from_osm(osm_candidate)
+            self.locations, self.osm_edges = load_graph_from_osm(osm_candidate)
         except Exception:
             # 回退到内置坐标 (兼容旧版本)
             self.locations = {
@@ -86,8 +87,8 @@ class SubstationGraph:
         """构建邻接表，基于变电站的物理布局"""
         adj_list = {}
         
-        # 定义连接关系 - 基于物理布局的合理路径
-        connections = [
+        # 若完整版 OSM 已包含 way 拓扑，优先使用地图中的连接关系。
+        connections = self.osm_edges or [
             # 入口区域连接
             ("入口点", "插值点1"),
             ("插值点1", "低压配电室1"),
@@ -142,8 +143,12 @@ class SubstationGraph:
         
         # 添加连接 (无向图，双向连接)
         for v1, v2 in connections:
-            adj_list[v1].append(v2)
-            adj_list[v2].append(v1)
+            if v1 not in adj_list or v2 not in adj_list:
+                continue
+            if v2 not in adj_list[v1]:
+                adj_list[v1].append(v2)
+            if v1 not in adj_list[v2]:
+                adj_list[v2].append(v1)
         
         return adj_list
     

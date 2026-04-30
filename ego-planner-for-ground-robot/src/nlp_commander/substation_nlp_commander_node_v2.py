@@ -9,8 +9,10 @@ import rospy
 import sys
 import os
 
-# 添加utils模块到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+# 确保从包目录加载本地 utils 模块
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+if PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, PACKAGE_DIR)
 
 from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager
 
@@ -41,13 +43,14 @@ class SubstationNlpCommanderV2:
         """任务完成回调"""
         print("🎉 巡检任务完成！准备接收新指令...")
     
-    def handle_navigation_request(self, waypoint_sequence: list, task_description: str) -> str:
+    def handle_navigation_request(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> str:
         """
         处理导航请求
         
         Args:
-            waypoint_sequence: 航点序列列表
+            waypoint_sequence: 目标设备序列列表
             task_description: 任务描述
+            task_type: LLM输出的任务类型，可选
             
         Returns:
             处理结果信息
@@ -72,11 +75,11 @@ class SubstationNlpCommanderV2:
         # 智能分析航点序列，确定最佳路径规划策略
         planned_path = []
         
-        if not waypoint_sequence:
+        if not waypoint_sequence and task_type != "full_inspection":
             return "❌ 未提供有效的航点序列"
         
         # 分析任务类型和目标
-        task_analysis = self._analyze_waypoint_sequence(waypoint_sequence, task_description)
+        task_analysis = self._analyze_waypoint_sequence(waypoint_sequence, task_description, task_type)
         rospy.loginfo(f"任务分析结果: {task_analysis}")
         
         if task_analysis["type"] == "single_target":
@@ -96,11 +99,11 @@ class SubstationNlpCommanderV2:
             planned_path = self.path_planner.plan_full_inspection(current_pos)
             
         else:
-            # 直接使用用户指定的路径，但验证连通性
+            # 自定义多点任务保留用户或LLM给出的显式访问顺序
             user_targets = self._expand_and_validate_targets(waypoint_sequence)
             rospy.loginfo(f"自定义路径规划: {current_pos} -> {user_targets}")
             if user_targets:
-                planned_path = self.path_planner.plan_multi_target_path(current_pos, user_targets)
+                planned_path = self.path_planner.plan_ordered_targets_path(current_pos, user_targets)
         
         # 验证路径
         if not planned_path:
@@ -113,21 +116,46 @@ class SubstationNlpCommanderV2:
         # 计算路径距离
         path_distance = self.path_planner.get_path_distance(planned_path)
         
+        # 根据目标设备集合生成停留标志：目标设备、起点和终点需要停留，过渡点仅通过。
+        stop_flags = self._assign_stop_flags(planned_path, task_analysis["targets"])
+
         # 启动导航任务
-        result = self.waypoint_manager.start_navigation_task(planned_path, task_description)
+        result = self.waypoint_manager.start_navigation_task(planned_path, task_description, stop_flags)
         
         # 添加路径信息
         result += f"\n📏 路径总距离: {path_distance:.1f}米"
         result += f"\n🛣️ 详细路径: {' → '.join(planned_path)}"
+        result += f"\n🛑 停留点: {' → '.join([name for name, stop in zip(planned_path, stop_flags) if stop])}"
         
         return result
+
+    def _assign_stop_flags(self, planned_path: list, target_devices: list) -> list:
+        """为全局 Waypoint 序列生成停留标志。"""
+        if not planned_path:
+            return []
+
+        target_set = set(target_devices)
+        last_index = len(planned_path) - 1
+        return [
+            index == 0 or index == last_index or waypoint_name in target_set
+            for index, waypoint_name in enumerate(planned_path)
+        ]
     
-    def _analyze_waypoint_sequence(self, waypoint_sequence: list, task_description: str) -> dict:
+    def _analyze_waypoint_sequence(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> dict:
         """分析航点序列，确定任务类型和目标"""
         
         # 根据任务描述和航点数量判断任务类型
         description_lower = task_description.lower()
         rospy.loginfo(f"分析任务: 描述='{task_description}', 航点={waypoint_sequence}")
+        normalized_task_type = (task_type or "").strip()
+
+        if normalized_task_type in {"single_target", "area_inspection", "full_inspection", "custom_path"}:
+            rospy.loginfo(f"采用LLM输出的任务类型: {normalized_task_type}")
+            if normalized_task_type == "full_inspection":
+                return {"type": "full_inspection", "targets": waypoint_sequence}
+
+            expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
+            return {"type": normalized_task_type, "targets": expanded_targets}
         
         # 完整巡检判断
         if any(keyword in description_lower for keyword in ["完整", "全面", "所有", "整个变电站", "巡检一圈"]):
@@ -217,6 +245,10 @@ class SubstationNlpCommanderV2:
         if "error" in llm_response:
             return llm_response["error"]
         
+        if llm_response.get("success") and "parsed" in llm_response:
+            return self._handle_structured_llm_result(llm_response["parsed"], command)
+
+        # 兼容旧版 Function Calling 测试桩或历史实现
         if llm_response.get("success") and llm_response.get("function_name") == "navigate_robot_with_path":
             # 执行导航请求
             args = llm_response["arguments"]
@@ -226,6 +258,51 @@ class SubstationNlpCommanderV2:
             )
         
         return "❌ LLM响应格式错误"
+
+    def _handle_structured_llm_result(self, parsed: dict, original_command: str) -> str:
+        """将 CoT + JSON 语义解析结果转换为路径规划请求。"""
+        task_type = parsed.get("task_type", "").strip()
+        task_description = parsed.get("task_description") or original_command
+        target_devices = parsed.get("target_devices", [])
+        target_names = self._extract_target_names(target_devices)
+
+        if task_type != "full_inspection" and not target_names:
+            return "❌ LLM未返回有效目标设备，请换一种更明确的巡检指令。"
+
+        result = self.handle_navigation_request(
+            waypoint_sequence=target_names,
+            task_description=task_description,
+            task_type=task_type,
+        )
+
+        reasoning = parsed.get("reasoning")
+        if reasoning:
+            result += f"\n🧠 语义解析: {reasoning}"
+        return result
+
+    def _extract_target_names(self, target_devices: list) -> list:
+        """从LLM返回的target_devices字段中提取按优先级排序的设备名称。"""
+        normalized_devices = []
+        for index, item in enumerate(target_devices):
+            if isinstance(item, dict):
+                name = item.get("name")
+                priority = item.get("priority", index + 1)
+            else:
+                name = str(item)
+                priority = index + 1
+
+            if not name:
+                continue
+
+            try:
+                priority_value = int(priority)
+            except (TypeError, ValueError):
+                priority_value = index + 1
+
+            normalized_devices.append((priority_value, name))
+
+        normalized_devices.sort(key=lambda item: item[0])
+        return [name for _, name in normalized_devices]
     
     def show_help(self):
         """显示帮助信息"""

@@ -140,5 +140,37 @@
     <tag k="device_type" v="waypoint"/>
   </node>
 
+  <!-- 简化拓扑边：仅保留连通关系，不包含坐标几何 -->
+  <way id="101"><nd ref="1"/><nd ref="2"/><tag k="name" v="入口点-插值点1"/></way>
+  <way id="102"><nd ref="2"/><nd ref="3"/><tag k="name" v="插值点1-低压配电室1"/></way>
+  <way id="103"><nd ref="2"/><nd ref="19"/><tag k="name" v="插值点1-35kv配电箱3"/></way>
+  <way id="104"><nd ref="3"/><nd ref="4"/><tag k="name" v="低压配电室1-低压配电室2"/></way>
+  <way id="105"><nd ref="4"/><nd ref="5"/><tag k="name" v="低压配电室2-低压配电室3"/></way>
+  <way id="106"><nd ref="3"/><nd ref="19"/><tag k="name" v="低压配电室1-35kv配电箱3"/></way>
+  <way id="107"><nd ref="4"/><nd ref="9"/><tag k="name" v="低压配电室2-变压器区1"/></way>
+  <way id="108"><nd ref="4"/><nd ref="6"/><tag k="name" v="低压配电室2-高压配电区巡检点1"/></way>
+  <way id="109"><nd ref="5"/><nd ref="6"/><tag k="name" v="低压配电室3-高压配电区巡检点1"/></way>
+  <way id="110"><nd ref="19"/><nd ref="18"/><tag k="name" v="35kv配电箱3-35kv配电箱2"/></way>
+  <way id="111"><nd ref="18"/><nd ref="17"/><tag k="name" v="35kv配电箱2-35kv配电箱1"/></way>
+  <way id="112"><nd ref="6"/><nd ref="7"/><tag k="name" v="高压配电区巡检点1-高压配电区巡检点2"/></way>
+  <way id="113"><nd ref="7"/><nd ref="8"/><tag k="name" v="高压配电区巡检点2-高压配电区巡检点3"/></way>
+  <way id="114"><nd ref="9"/><nd ref="10"/><tag k="name" v="变压器区1-变压器区2"/></way>
+  <way id="115"><nd ref="10"/><nd ref="11"/><tag k="name" v="变压器区2-变压器区3"/></way>
+  <way id="116"><nd ref="12"/><nd ref="8"/><tag k="name" v="插值点2-高压配电区巡检点3"/></way>
+  <way id="117"><nd ref="12"/><nd ref="11"/><tag k="name" v="插值点2-变压器区3"/></way>
+  <way id="118"><nd ref="12"/><nd ref="13"/><tag k="name" v="插值点2-3SVG无功补偿区"/></way>
+  <way id="119"><nd ref="13"/><nd ref="14"/><tag k="name" v="3SVG无功补偿区-2SVG无功补偿区"/></way>
+  <way id="120"><nd ref="14"/><nd ref="15"/><tag k="name" v="2SVG无功补偿区-1SVG无功补偿区"/></way>
+  <way id="121"><nd ref="15"/><nd ref="17"/><tag k="name" v="1SVG无功补偿区-35kv配电箱1"/></way>
+  <way id="122"><nd ref="14"/><nd ref="18"/><tag k="name" v="2SVG无功补偿区-35kv配电箱2"/></way>
+  <way id="123"><nd ref="13"/><nd ref="8"/><tag k="name" v="3SVG无功补偿区-高压配电区巡检点3"/></way>
+  <way id="124"><nd ref="16"/><nd ref="17"/><tag k="name" v="插值点3-35kv配电箱1"/></way>
+  <way id="125"><nd ref="16"/><nd ref="15"/><tag k="name" v="插值点3-1SVG无功补偿区"/></way>
+  <way id="126"><nd ref="16"/><nd ref="20"/><tag k="name" v="插值点3-插值点4"/></way>
+  <way id="127"><nd ref="20"/><nd ref="21"/><tag k="name" v="插值点4-插值点5"/></way>
+  <way id="128"><nd ref="21"/><nd ref="22"/><tag k="name" v="插值点5-插值点6"/></way>
+  <way id="129"><nd ref="22"/><nd ref="23"/><tag k="name" v="插值点6-插值点7"/></way>
+  <way id="130"><nd ref="23"/><nd ref="1"/><tag k="name" v="插值点7-入口点"/></way>
+
 </osm>
 

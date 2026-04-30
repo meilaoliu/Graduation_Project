@@ -7,7 +7,7 @@ OSM 地图加载工具
 
 import os
 import xml.etree.ElementTree as ET
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 
 def _resolve_path(path: str) -> str:
@@ -32,6 +32,17 @@ def load_locations_from_osm(osm_path: str) -> Dict[str, Tuple[float, float]]:
     Returns:
         dict: {设备名称: (x, y)}，其中 (x, y) 以 OSM 的 (lon, lat) 简单映射为平面坐标。
     """
+    locations, _ = load_graph_from_osm(osm_path)
+    return locations
+
+
+def load_graph_from_osm(osm_path: str) -> Tuple[Dict[str, Tuple[float, float]], List[Tuple[str, str]]]:
+    """
+    从完整 OSM 地图中加载设备节点坐标和拓扑边。
+
+    节点通过 name 标签映射为系统内部名称；way 中相邻 nd 引用会被解释为
+    可通行边。若地图暂未包含 way，返回的边列表为空，调用方可回退到内置拓扑。
+    """
     full_path = _resolve_path(osm_path)
     if not os.path.exists(full_path):
         raise FileNotFoundError(f"OSM 地图文件不存在: {full_path}")
@@ -40,8 +51,10 @@ def load_locations_from_osm(osm_path: str) -> Dict[str, Tuple[float, float]]:
     root = tree.getroot()
 
     locations: Dict[str, Tuple[float, float]] = {}
+    node_id_to_name: Dict[str, str] = {}
 
     for node in root.findall("node"):
+        node_id = node.get("id")
         lat = node.get("lat")
         lon = node.get("lon")
         if lat is None or lon is None:
@@ -60,11 +73,30 @@ def load_locations_from_osm(osm_path: str) -> Dict[str, Tuple[float, float]]:
             x = float(lon)
             y = float(lat)
             locations[name] = (x, y)
+            if node_id is not None:
+                node_id_to_name[node_id] = name
         except ValueError:
-            # 坐标格式不正确时跳过该节点
             continue
 
-    return locations
+    edges: List[Tuple[str, str]] = []
+    seen_edges = set()
+
+    for way in root.findall("way"):
+        refs = [nd.get("ref") for nd in way.findall("nd") if nd.get("ref")]
+        for first_ref, second_ref in zip(refs, refs[1:]):
+            first_name = node_id_to_name.get(first_ref)
+            second_name = node_id_to_name.get(second_ref)
+            if not first_name or not second_name or first_name == second_name:
+                continue
+
+            edge_key = tuple(sorted((first_name, second_name)))
+            if edge_key in seen_edges:
+                continue
+
+            seen_edges.add(edge_key)
+            edges.append((first_name, second_name))
+
+    return locations, edges
 
 
 def load_simplified_osm(osm_path: str) -> str:

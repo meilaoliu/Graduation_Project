@@ -11,9 +11,21 @@ import os
 import json
 from typing import Dict, List, Optional, Any
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 from .osm_map_loader import load_simplified_osm
+
+PROXY_ENV_VARS = [
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+]
 
 try:
     import rospy
@@ -29,26 +41,80 @@ except ImportError:
 class LLMClient:
     """大语言模型客户端"""
 
-    def __init__(self, api_key: str = None, base_url: str = None):
-        # 清理代理环境变量
-        for proxy_var in [
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-        ]:
-            os.environ.pop(proxy_var, None)
+    def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if self._parse_bool(os.getenv("DASHSCOPE_CLEAR_PROXY"), False):
+            for proxy_var in PROXY_ENV_VARS:
+                os.environ.pop(proxy_var, None)
 
-        # 初始化客户端（DashScope OpenAI 兼容接口）
-        self.client = OpenAI(
-            api_key=api_key or "sk-905de984fe624c8d91db26b4f081a676",
-            base_url=base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        self.base_url = base_url or os.getenv(
+            "DASHSCOPE_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
+        self.model = model or os.getenv("DASHSCOPE_MODEL", "qwen3.6-plus")
+        self.enable_thinking = self._parse_bool(os.getenv("DASHSCOPE_ENABLE_THINKING"), False)
+        self.temperature = self._parse_float(os.getenv("DASHSCOPE_TEMPERATURE"), 0.1)
+        self.max_tokens = self._parse_int(os.getenv("DASHSCOPE_MAX_TOKENS"), 2048)
+        self.client = None
+        self.client_error = ""
+
+        if OpenAI is None:
+            rospy.logwarn("未安装 openai Python 包，LLM 指令解析功能不可用。")
+        elif not self.api_key:
+            rospy.logwarn("未设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY，LLM 指令解析功能不可用。")
+        else:
+            try:
+                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                rospy.loginfo(
+                    "LLM配置: "
+                    f"model={self.model}, base_url={self.base_url}, "
+                    f"enable_thinking={self.enable_thinking}, "
+                    f"temperature={self.temperature}, max_tokens={self.max_tokens}"
+                )
+            except Exception as e:
+                self.client_error = self._format_client_init_error(e)
+                rospy.logerr(self.client_error)
 
         # 简化版 OSM 地图路径（相对于 nlp_commander 目录）
         self.simplified_osm_path = "maps/simplified_substation.osm"
+
+    @staticmethod
+    def _parse_bool(value: str, default: bool) -> bool:
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+
+    @staticmethod
+    def _parse_float(value: str, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_int(value: str, default: int) -> int:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _format_client_init_error(error: Exception) -> str:
+        proxy_names = [proxy_var for proxy_var in PROXY_ENV_VARS if os.getenv(proxy_var)]
+        proxy_text = ", ".join(proxy_names) if proxy_names else "未设置"
+        message = f"初始化 OpenAI 兼容客户端失败: {type(error).__name__}: {error}"
+        if "Unknown scheme for proxy URL" in str(error):
+            message += (
+                "。检测到代理变量: "
+                f"{proxy_text}。httpx 不接受 socks:// 写法；可改为 http://127.0.0.1:7890，"
+                "或安装 SOCKS 支持后使用 socks5://127.0.0.1:7890，"
+                "也可设置 DASHSCOPE_CLEAR_PROXY=1 临时忽略代理。"
+            )
+        return message
 
     def create_system_prompt(
         self, current_pos_info: str, available_locations: List[str]
@@ -110,6 +176,7 @@ class LLMClient:
 
 其中：
 - target_devices 中的 name 必须来自地图中的设备名称，且尽量与用户指令语义对齐。
+- target_devices 只输出真实巡检设备，不要输出 device_type 为 waypoint 的中间航点，也不要输出入口点；中间路径由 Dijkstra 自动补全。
 - priority 为正整数，数值越小说明优先级越高。
 - 当用户要求完整巡检时，可以将所有设备点都列入 target_devices，并按合理顺序排序。
 - 若用户指令无法在地图中找到对应设备，请在 reasoning 中解释，并根据地图信息给出最接近的备选设备列表。
@@ -136,6 +203,12 @@ class LLMClient:
             dict: 若成功，则形如 {"success": True, "parsed": {...}}，
                   其中 parsed 为大模型输出的 JSON 对象。
         """
+        if self.client is None:
+            return {
+                "error": self.client_error
+                or "❌ LLM客户端不可用，请先安装 openai 并设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY。"
+            }
+
         system_prompt = self.create_system_prompt(current_pos_info, available_locations)
         user_message = f"用户巡检指令: {command}"
 
@@ -145,11 +218,18 @@ class LLMClient:
         ]
 
         try:
-            response = self.client.chat.completions.create(
-                model="qwen-plus",
-                messages=messages,
-                response_format={"type": "json_object"},
-            )
+            request_kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+
+            if self.model.lower().startswith("qwen") or "DASHSCOPE_ENABLE_THINKING" in os.environ:
+                request_kwargs["extra_body"] = {"enable_thinking": self.enable_thinking}
+
+            response = self.client.chat.completions.create(**request_kwargs)
 
             response_message = response.choices[0].message
             content = response_message.content
@@ -169,6 +249,11 @@ class LLMClient:
 
         except Exception as e:
             rospy.logerr(f"大模型调用错误: {e}")
+            if e.__class__.__name__ == "APIConnectionError":
+                return {
+                    "error": "❌ 大模型连接失败，请检查网络、DASHSCOPE_BASE_URL、DNS 或代理设置。"
+                    f"当前 base_url={self.base_url}。"
+                }
             return {"error": f"❌ 大模型调用失败: {str(e)}"}
 
     def get_available_models(self) -> List[str]:

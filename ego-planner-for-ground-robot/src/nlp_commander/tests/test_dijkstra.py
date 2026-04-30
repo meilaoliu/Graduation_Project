@@ -7,8 +7,10 @@
 import sys
 import os
 
-# 添加utils模块到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+# 添加 nlp_commander 包根目录到路径
+PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, PACKAGE_DIR)
 
 from utils.graph_utils import SubstationGraph
 from utils.path_planner import PathPlanner

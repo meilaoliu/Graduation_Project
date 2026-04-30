@@ -66,9 +66,13 @@ class SubstationNlpCommander:
         for proxy_var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
             os.environ.pop(proxy_var, None)
 
+        api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            rospy.logwarn("未设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY，LLM 调用会失败。")
+
         # LLM客户端初始化
         self.client = OpenAI(
-            api_key="sk-905de984fe624c8d91db26b4f081a676",
+            api_key=api_key or "EMPTY_API_KEY",
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
         
