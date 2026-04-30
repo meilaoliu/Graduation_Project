@@ -59,8 +59,13 @@ namespace ego_planner
     odom_adjust_pub_ = nh.advertise<nav_msgs::Odometry>("/odom_adjust",100);
     dir_pub = nh.advertise<std_msgs::UInt8>("/direction",100);
     stop_pub = nh.advertise<std_msgs::UInt8>("/emergency_stop",100);
+    // 分段完成事件：当一段全局轨迹自然执行完毕时发布段编号，供上层调度器（nlp_commander）触发拍照/dwell/下一段
+    segment_done_pub_ = nh.advertise<std_msgs::UInt8>("/segment_done", 10);
 
     is_target_receive = false;
+
+    // 始终订阅 /global_waypoints，便于在任何 flight_type 下都能由外部脚本注入分段巡检任务（纯增量、对原模式无影响）
+    segment_waypoints_sub_ = nh.subscribe("/global_waypoints", 1, &EGOReplanFSM::segmentWaypointsCallback, this);
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
       waypoint_sub_ = nh.subscribe("/way_point", 1, &EGOReplanFSM::goal_callback, this);
@@ -71,6 +76,11 @@ namespace ego_planner
       while (ros::ok() && !have_odom_)
         ros::spinOnce();
       planGlobalTrajbyGivenWps();
+    }
+    else if (target_type_ == TARGET_TYPE::DYNAMIC_WAYPOINTS)
+    {
+      // 等待外部 /global_waypoints 推送，启动时无需做任何事；状态会停在 INIT/WAIT_TARGET
+      ROS_INFO("[FSM] DYNAMIC_WAYPOINTS mode: waiting for /global_waypoints (nav_msgs/Path).");
     }
     else
       cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
@@ -193,9 +203,145 @@ namespace ego_planner
     }
   }
 
+  void EGOReplanFSM::segmentWaypointsCallback(const nav_msgs::PathConstPtr &msg)
+  {
+    if (!have_odom_)
+    {
+      ROS_WARN("[FSM][segment] odom not ready, ignore /global_waypoints message.");
+      return;
+    }
+
+    if (msg->poses.empty())
+    {
+      ROS_WARN("[FSM][segment] /global_waypoints with empty path, ignored.");
+      return;
+    }
+
+    // 段编号优先取 header.seq；上游手动设置时可保证段号严格递增
+    current_segment_id_ = static_cast<uint32_t>(msg->header.seq);
+
+    // 把 Path 中所有 pose 视为本段的 waypoint 序列。
+    // 约定：上层 (nlp_commander 的 SegmentScheduler) 已经按"停留点"切好段，
+    //       因此本段首尾即停留点；这里强制首尾速度/加速度为 0，符合论文中"段间静止拍照"的语义。
+    std::vector<Eigen::Vector3d> wps;
+    wps.reserve(msg->poses.size());
+    for (const auto &p : msg->poses)
+    {
+      wps.emplace_back(p.pose.position.x, p.pose.position.y, p.pose.position.z);
+    }
+
+    // 起点位姿用当前 odom，符合"机器人就停在上段终点"的物理事实
+    bool success = planner_manager_->planGlobalTrajWaypoints(
+        odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+        wps, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+
+    // 段末作为本段的 end_pt_，用于后续 EXEC_TRAJ 终止判定
+    end_pt_ = wps.back();
+
+    // 可视化所有段内 waypoint
+    for (size_t i = 0; i < wps.size(); ++i)
+    {
+      visualization_->displayGoalPoint(wps[i], Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, static_cast<int>(i));
+      ros::Duration(0.001).sleep();
+    }
+
+    if (!success)
+    {
+      ROS_ERROR("[FSM][segment %u] planGlobalTrajWaypoints failed (n=%zu).", current_segment_id_, wps.size());
+      has_active_segment_ = false;
+      return;
+    }
+
+    // 渲染整段全局参考轨迹（B样条/MINCO 共用同一份 global_data_）
+    constexpr double step_size_t = 0.1;
+    int i_end = floor(planner_manager_->global_data_.global_duration_ / step_size_t);
+    std::vector<Eigen::Vector3d> global_traj;
+    global_traj.reserve(std::max(0, i_end));
+    for (int i = 0; i < i_end; ++i)
+    {
+      global_traj.push_back(planner_manager_->global_data_.global_traj_.evaluate(i * step_size_t));
+    }
+    visualization_->displayGlobalPathList(global_traj, 0.1, 0);
+
+    end_vel_.setZero();
+    have_target_ = true;
+    have_new_target_ = true;
+    trigger_ = true;
+    has_active_segment_ = true;
+
+    ROS_INFO("[FSM][segment %u] accepted, %zu waypoints, duration=%.2fs.",
+             current_segment_id_, wps.size(), planner_manager_->global_data_.global_duration_);
+
+    // 触发新一段的局部轨迹生成；若当前正在执行轨迹，按 waypointCallback 中已有的逻辑处理大航向偏差
+    if (exec_state_ == WAIT_TARGET || exec_state_ == INIT)
+      changeFSMExecState(GEN_NEW_TRAJ, "SEG");
+    else if (exec_state_ == EXEC_TRAJ)
+    {
+      double target_dir = std::atan2((end_pt_ - odom_pos_)(1), (end_pt_ - odom_pos_)(0));
+      double angle_diff = target_dir - yaw;
+      while (angle_diff > PI) angle_diff -= 2 * PI;
+      while (angle_diff < -PI) angle_diff += 2 * PI;
+      const double yaw_thresh = forward_only_ ? (PI / 2.0) : (2.0 * PI / 3.0);
+      if (std::abs(angle_diff) > yaw_thresh)
+      {
+        callEmergencyStop(odom_pos_);
+        changeFSMExecState(GEN_NEW_TRAJ, "SEG");
+      }
+      else
+      {
+        changeFSMExecState(REPLAN_TRAJ, "SEG");
+      }
+    }
+    else
+    {
+      changeFSMExecState(GEN_NEW_TRAJ, "SEG");
+    }
+  }
+
 void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg)
 {
-    end_pt_ << msg->pose.position.x, msg->pose.position.y, odom_pos_(2);
+    Eigen::Vector3d req_end_pt;
+    req_end_pt << msg->pose.position.x, msg->pose.position.y, odom_pos_(2);
+
+    // === 修复: 目标点位于障碍物内的处理 ===
+    // 若用户/上层指定了一个落在膨胀障碍内的终点, 直接交给规划器只会陷入
+    // "全局规划失败 → REPLAN 死循环 → 无止境失败" 的状态。
+    // 这里先做一次螺旋搜索, 把目标投射到最近的可达自由点; 若邻域内无自由点
+    // (如终点深陷大型障碍中央), 则直接拒绝该目标。
+    auto goal_map = planner_manager_->grid_map_;
+    if (goal_map && goal_map->getInflateOccupancy(req_end_pt) == 1)
+    {
+        bool found_free = false;
+        Eigen::Vector3d free_pt = req_end_pt;
+        constexpr double max_search_radius = 2.0;
+        constexpr double step = 0.15;
+        for (double r = step; r <= max_search_radius && !found_free; r += step)
+        {
+            for (double a = 0; a < 2.0 * M_PI - 1e-3; a += M_PI / 8.0)
+            {
+                Eigen::Vector3d cand(req_end_pt(0) + r * std::cos(a),
+                                     req_end_pt(1) + r * std::sin(a),
+                                     req_end_pt(2));
+                if (goal_map->getInflateOccupancy(cand) == 0)
+                {
+                    free_pt = cand;
+                    found_free = true;
+                    break;
+                }
+            }
+        }
+        if (!found_free)
+        {
+            ROS_ERROR("[goal_callback] Goal (%.2f, %.2f) lies inside obstacle and no free point within %.1fm. Goal rejected.",
+                      req_end_pt(0), req_end_pt(1), max_search_radius);
+            return;
+        }
+        ROS_WARN("[goal_callback] Goal (%.2f, %.2f) inside obstacle, projected to nearest free (%.2f, %.2f).",
+                 req_end_pt(0), req_end_pt(1), free_pt(0), free_pt(1));
+        req_end_pt = free_pt;
+    }
+
+    end_pt_ = req_end_pt;
     trigger_ = true;
     init_pt_ = odom_pos_;
     goal_last = end_pt_;
@@ -470,6 +616,20 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
     case GEN_NEW_TRAJ:
     {
+      // === 修复 B: 同 tick 重试冷却 ===
+      // 33ms 内堆 11 次同 start/同 target 的 max_restarts 是死循环主源:
+      // FSM 失败 → 立即 changeFSMExecState(GEN_NEW_TRAJ, ...) → 输入完全没变 → 同样失败。
+      // 此处强制最少间隔 100ms, 期间留 odom/map 一次更新机会, 并避免日志被刷爆。
+      if (consecutive_gen_failure_count_ > 0)
+      {
+        ros::Time now_t = ros::Time::now();
+        if ((now_t - last_gen_failure_stamp_).toSec() < 0.10)
+        {
+          // 不切状态, 让 exec_timer_ 下个 tick (~10ms) 再来; 真正放行需 >=100ms 后
+          break;
+        }
+      }
+
       start_pt_ = odom_pos_;
       // P0-B: 不再硬清零 start_vel_。MINCO finelyCheck 在 |v|≈0 时
       // 会让承载点的曲率/碰撞段判断失真，进而把 NaN 端点喂给 A*，
@@ -518,6 +678,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       {
           // Fix G: 成功一次 → 重置 stuck 计数
           consecutive_init_collision_count_ = 0;
+          consecutive_gen_failure_count_ = 0;
           // 根据轨迹类型获取速度
           Eigen::Vector3d vel_start;
           auto info = &planner_manager_->local_data_;
@@ -618,6 +779,35 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         }
         else
         {
+          // 通用退避: 不论 reason, 连续失败堆积时强制 emergency + 全局重规
+          // 切断 "30+ Replan / 33ms 同 start 同 target 重复失败" 死循环
+          consecutive_gen_failure_count_++;
+          // 修复 B: 记录失败时间戳, 进入 GEN_NEW_TRAJ 入口的 100ms 冷却窗口
+          last_gen_failure_stamp_ = ros::Time::now();
+          if (consecutive_gen_failure_count_ >= 3)
+          {
+            // === 修复: 若失败原因是终点已落入障碍 (例如地图更新后),
+            // 反复 planGlobalTraj 也无济于事 → 直接放弃当前 target
+            auto map_now = planner_manager_->grid_map_;
+            if (map_now && map_now->getInflateOccupancy(end_pt_) == 1)
+            {
+              ROS_ERROR("[FSM] %d consecutive failures and end_pt (%.2f, %.2f) is now in obstacle. Drop target, back to WAIT_TARGET.",
+                        consecutive_gen_failure_count_, end_pt_(0), end_pt_(1));
+              callEmergencyStop(odom_pos_);
+              have_target_ = false;
+              have_new_target_ = false;
+              trigger_ = false;
+              consecutive_gen_failure_count_ = 0;
+              changeFSMExecState(WAIT_TARGET, "FSM");
+              break;
+            }
+            ROS_WARN("[FSM] %d consecutive GEN_NEW_TRAJ failures, emergency stop + global replan",
+                     consecutive_gen_failure_count_);
+            callEmergencyStop(odom_pos_);
+            planner_manager_->planGlobalTraj(odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                                              end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+            consecutive_gen_failure_count_ = 0;
+          }
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
         }
       }
@@ -729,6 +919,15 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         if (dist_to_goal_actual < 0.5)
         {
           have_target_ = false;
+          // 分段巡检：到达本段终点时通知上层调度器（适用于 B样条 / MINCO 两种局部规划器，因为本判定基于 odom + global_data_，与具体样条无关）
+          if (has_active_segment_)
+          {
+            std_msgs::UInt8 done_msg;
+            done_msg.data = static_cast<uint8_t>(current_segment_id_ & 0xFF);
+            segment_done_pub_.publish(done_msg);
+            ROS_INFO("[FSM][segment %u] done, notified /segment_done.", current_segment_id_);
+            has_active_segment_ = false;
+          }
           changeFSMExecState(WAIT_TARGET, "FSM");
           return;
         }
