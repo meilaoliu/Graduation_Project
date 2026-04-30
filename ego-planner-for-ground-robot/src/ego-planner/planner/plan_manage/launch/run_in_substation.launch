@@ -8,6 +8,11 @@
   <arg name="odom_topic" value="/state_estimation" />
   <arg name="pointcloud_topic" value="/registered_scan" />
 
+  <!-- 1: use 2D Nav Goal to select goal  -->
+  <!-- 2: use global waypoints below  -->
+  <!-- 3: dynamic waypoints from /global_waypoints (inspection_full) -->
+  <arg name="flight_type" default="1" />
+
   <!-- main algorithm params -->
   <include file="$(find ego_planner)/launch/advanced_substation_param.xml">
 
@@ -48,7 +53,8 @@
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->
-    <arg name="flight_type" value="1" />
+    <!-- 3: dynamic waypoints from /global_waypoints (inspection_full) -->
+    <arg name="flight_type" value="$(arg flight_type)" />
     
     <!-- global waypoints -->
     <!-- It generates a piecewise min-snap traj passing all waypoints -->
