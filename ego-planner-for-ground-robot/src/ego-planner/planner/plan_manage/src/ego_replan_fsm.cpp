@@ -60,7 +60,7 @@ namespace ego_planner
     dir_pub = nh.advertise<std_msgs::UInt8>("/direction",100);
     stop_pub = nh.advertise<std_msgs::UInt8>("/emergency_stop",100);
     // 分段完成事件：当一段全局轨迹自然执行完毕时发布段编号，供上层调度器（nlp_commander）触发拍照/dwell/下一段
-    segment_done_pub_ = nh.advertise<std_msgs::UInt8>("/segment_done", 10);
+    segment_done_pub_ = nh.advertise<std_msgs::UInt32>("/segment_done", 10);
 
     is_target_receive = false;
 
@@ -922,8 +922,8 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           // 分段巡检：到达本段终点时通知上层调度器（适用于 B样条 / MINCO 两种局部规划器，因为本判定基于 odom + global_data_，与具体样条无关）
           if (has_active_segment_)
           {
-            std_msgs::UInt8 done_msg;
-            done_msg.data = static_cast<uint8_t>(current_segment_id_ & 0xFF);
+            std_msgs::UInt32 done_msg;
+            done_msg.data = current_segment_id_;
             segment_done_pub_.publish(done_msg);
             ROS_INFO("[FSM][segment %u] done, notified /segment_done.", current_segment_id_);
             has_active_segment_ = false;

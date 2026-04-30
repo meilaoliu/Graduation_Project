@@ -18,7 +18,7 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 if PACKAGE_DIR not in sys.path:
     sys.path.insert(0, PACKAGE_DIR)
 
-from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager
+from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager, SegmentScheduler
 
 class SubstationNlpCommanderV2:
     """变电站智能巡检指挥官 V2.0"""
@@ -36,6 +36,19 @@ class SubstationNlpCommanderV2:
             on_waypoint_reached=self.on_waypoint_reached,
             on_task_completed=self.on_task_completed
         )
+
+        # 全局轨迹分段调度器 (新流程)
+        self.use_global_traj = bool(rospy.get_param('~use_global_traj', True))
+        if self.use_global_traj and SegmentScheduler is not None:
+            self.segment_scheduler = SegmentScheduler(
+                graph=self.path_planner.graph,
+                get_current_xy=self.waypoint_manager.get_current_coordinates,
+                say=lambda m: self._say(m),
+            )
+            rospy.loginfo("已启用全局轨迹分段调度模式 (use_global_traj=True)")
+        else:
+            self.segment_scheduler = None
+            rospy.loginfo("使用经典逐航点导航模式 (use_global_traj=False)")
 
         # 聊天通道：与 Web Dashboard / 其他外部 UI 双向交互
         self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
@@ -147,8 +160,21 @@ class SubstationNlpCommanderV2:
         # 根据目标设备集合生成停留标志：目标设备、起点和终点需要停留，过渡点仅通过。
         stop_flags = self._assign_stop_flags(planned_path, task_analysis["targets"])
 
-        # 启动导航任务
-        result = self.waypoint_manager.start_navigation_task(planned_path, task_description, stop_flags)
+        # 启动导航任务（按模式分支）
+        if self.segment_scheduler is not None:
+            # 解析 (name, (x,y), stop) 元组列表
+            wp_tuples = []
+            for name, stop in zip(planned_path, stop_flags):
+                coords = self.path_planner.graph.get_location_coordinates(name)
+                if coords is None:
+                    continue
+                wp_tuples.append((name, coords, stop))
+            if not wp_tuples:
+                return f"❌ 无法解析任何航点坐标: {planned_path}"
+            result = self.segment_scheduler.start_task(wp_tuples, task_description)
+        else:
+            result = self.waypoint_manager.start_navigation_task(
+                planned_path, task_description, stop_flags)
         
         # 添加路径信息
         result += f"\n📏 路径总距离: {path_distance:.1f}米"
@@ -395,12 +421,17 @@ class SubstationNlpCommanderV2:
             return
         if low == 'status':
             self.show_status()
+            if self.segment_scheduler is not None:
+                self._say(f"🔧 调度器状态: {self.segment_scheduler.status()}")
             return
         if low == 'graph':
             self.show_graph_info()
             return
         if low == 'stop':
-            result = self.waypoint_manager.stop_current_task()
+            if self.segment_scheduler is not None and self.segment_scheduler.is_active():
+                result = self.segment_scheduler.stop_task()
+            else:
+                result = self.waypoint_manager.stop_current_task()
             self._say(f"📋 {result}")
             return
         if low == 'pause':

@@ -12,9 +12,15 @@ try:
 except ImportError:
     WaypointManager = None
 
+try:
+    from .segment_scheduler import SegmentScheduler
+except ImportError:
+    SegmentScheduler = None
+
 __all__ = [
     'SubstationGraph',
     'LLMClient', 
     'PathPlanner',
-    'WaypointManager'
+    'WaypointManager',
+    'SegmentScheduler',
 ] 

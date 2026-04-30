@@ -8,6 +8,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 #include <std_msgs/UInt8.h>
+#include <std_msgs/UInt32.h>
 #include <ros/ros.h>
 #include <std_msgs/Empty.h>
 #include <vector>
