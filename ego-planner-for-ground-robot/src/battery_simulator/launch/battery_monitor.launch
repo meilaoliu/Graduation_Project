@@ -1,0 +1,19 @@
+<launch>
+  <arg name="initial_percentage" default="100.0"/>
+  <arg name="low_threshold" default="20.0"/>
+  <arg name="odom_topic" default="/odom_adjust"/>
+
+  <node pkg="battery_simulator" type="battery_monitor_node.py" name="battery_monitor" output="screen">
+    <param name="initial_percentage" value="$(arg initial_percentage)"/>
+    <param name="base_rate" value="0.005"/>
+    <param name="k_v" value="0.05"/>
+    <param name="k_w" value="0.02"/>
+    <param name="photo_cost" value="0.3"/>
+    <param name="low_threshold" value="$(arg low_threshold)"/>
+    <param name="critical_threshold" value="5.0"/>
+    <param name="charge_rate" value="5.0"/>
+    <param name="update_rate_hz" value="10.0"/>
+    <param name="publish_rate_hz" value="1.0"/>
+    <param name="odom_topic" value="$(arg odom_topic)"/>
+  </node>
+</launch>
