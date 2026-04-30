@@ -1,0 +1,18 @@
+<launch>
+  <arg name="host"               default="0.0.0.0"/>
+  <arg name="port"               default="5000"/>
+  <arg name="odom_topic"         default="/odom_adjust"/>
+  <arg name="image_topic"        default="/camera/image"/>
+  <arg name="camera_max_hz"      default="5.0"/>
+  <arg name="camera_jpeg_quality" default="60"/>
+
+  <node pkg="inspection_dashboard" type="dashboard_node.py"
+        name="inspection_dashboard" output="screen">
+    <param name="host"               value="$(arg host)"/>
+    <param name="port"               value="$(arg port)"/>
+    <param name="odom_topic"         value="$(arg odom_topic)"/>
+    <param name="image_topic"        value="$(arg image_topic)"/>
+    <param name="camera_max_hz"      value="$(arg camera_max_hz)"/>
+    <param name="camera_jpeg_quality" value="$(arg camera_jpeg_quality)"/>
+  </node>
+</launch>
