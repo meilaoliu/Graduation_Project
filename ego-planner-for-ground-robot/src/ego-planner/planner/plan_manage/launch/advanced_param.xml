@@ -103,7 +103,7 @@
     <param name="grid_map/local_update_range_x"  value="8.0" />
     <param name="grid_map/local_update_range_y"  value="8.0" />
     <param name="grid_map/local_update_range_z"  value="1.5" />
-    <param name="grid_map/obstacles_inflation"     value="0.5" />
+    <param name="grid_map/obstacles_inflation"     value="0.3" />
     <param name="grid_map/local_map_margin" value="2"/>
     <param name="grid_map/ground_height"        value="-0.01"/>
     <!-- camera parameter -->
@@ -146,7 +146,7 @@
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <!--是否开启拓扑同伦轨迹（会增加计算量）-->
-    <param name="manager/use_multitopology_trajs" value="true" type="bool"/>
+    <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
@@ -171,15 +171,15 @@
     <!-- 修复 (穿障): 1500 时仍有 SAFETY 期间 Replan 抢救, 上调到 2500 强约束 -->
     <param name="optimization/weight_obstacle" value="1200.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="1200.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
     <!-- 修复 D: weight_curv 500 让代价面过陡, 初值偏差就炸 → 中间值 250 -->
-    <param name="optimization/weight_curv" value="200.0" type="double"/>
+    <param name="optimization/weight_curv" value="100.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="1000.0" type="double"/>
     <!-- atan 软饱和 (Fix H2) 已限制 RT≤431, 可以放心调到 450 -->
-    <param name="optimization/weight_time" value="400.0" type="double"/>
+    <param name="optimization/weight_time" value="300.0" type="double"/>
     <!-- 修复 (穿障): clearance 过小时 cost 梯度太弱, 0.13 → 0.18 抬高安全余量 -->
     <param name="optimization/obstacle_clearance" value="0.15" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="0.25" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.30" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     
     <!-- MPC 控制器参数 -->
