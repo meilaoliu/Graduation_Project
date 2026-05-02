@@ -117,6 +117,9 @@ namespace ego_planner
                   max_k = std::max(max_k, ki);
                 }
               }
+              printf("[TRAJ_CAND] max_v=%.2f, max_a=%.2f, max_k=%.2f, duration=%.2f\n",
+                max_v, max_a, max_k, traj.getTotalDuration());
+
               printf("[TRAJ_OK] max_v=%.2f, max_a=%.2f, max_k=%.2f, duration=%.2f\n",
                      max_v, max_a, max_k, traj.getTotalDuration());
             }
@@ -127,14 +130,11 @@ namespace ego_planner
             flag_still_unsafe = true;
             restart_nums++;
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f, fine check collided, keep optimizing\n\033[0m", iter_num_, time_ms);
-            // [Fix J: 确定性 restart 扰动] 0.5cm→2cm→5cm,
-            // 不再随机, 按维度轮询正负方向 → 跨帧 plan 看到同样的 restart 序列,
-            // 减少 plan #N 与 plan #N+1 落在不同局部极小导致的左右跳变。
+            // [Fix J: 确定性 restart 扰动] 必须保留: amp=0 会让 3 次 restart 包同一盆地 → 毫无意义
             {
               double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
               for (int k = 0; k < (int)initInnerPts.size(); ++k)
                 x_init[k] += ((k % 2 == 0) ? amp : -amp);
-              // 时间维 不再加噪 (避免与 Fix H 虚拟时间区间同时发生漂移)
             }
         }
       }
@@ -300,6 +300,16 @@ namespace ego_planner
     bool occ, last_occ = false;
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
     int i_end = ConstraintPoints::two_thirds_id(init_points, touch_goal_); // only check closed 2/3 points.
+
+    // === 修复 A: 地面机器人 5s 轨迹的最后 1/3 (~2m) 不能省略校验,
+    // 否则 finelyCheck 直接漏过尾段的障碍 → FSM 当成 OBS_FREE 发布 →
+    // checkCollisionCallback 才在 t=2.x 处补救, 但车已开过去撞了。
+    // touch_goal 时 two_thirds_id 已 = cols-1; 这里只在非 touch_goal 路径下扩到 95%。
+    if (!touch_goal_)
+    {
+      int extended = init_points.cols() - 2; // 留 1 个尾点缓冲, 其余全检
+      if (extended > i_end) i_end = extended;
+    }
 
     PtsChk_t pts_check;
     if (!computePointsToCheck(traj, i_end, pts_check))
@@ -1794,6 +1804,8 @@ namespace ego_planner
     nh.param("optimization/max_vel", max_vel_, -1.0);
     nh.param("optimization/max_acc", max_acc_, -1.0);
     nh.param("optimization/max_jer", max_jer_, -1.0);
+    if (max_jer_ <= 0.0)
+      nh.param("optimization/max_jerk", max_jer_, -1.0);
     nh.param("optimization/max_curv", max_curv_, -1.0);
   }
 

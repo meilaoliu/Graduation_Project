@@ -363,7 +363,9 @@ inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos) {
 inline int GridMap::getInflateOccupancy2d(Eigen::Vector2d pos) {
     if (!isInMap2d(pos))
     {
-        ROS_INFO("Run here!");
+        // Out-of-map: 视作未知 (-1). 调用方需自行处理 -1.
+        // 原 ROS_INFO("Run here!") 在 finelyCheck/optimizer 高频调用下会刷屏 +
+        // 严重拖慢节点 → 直接静默返回.
         return -1;
     }
 

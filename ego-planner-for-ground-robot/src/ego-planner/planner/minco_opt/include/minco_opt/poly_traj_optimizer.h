@@ -71,6 +71,15 @@ namespace ego_planner
     AStar::Ptr a_star_;
     poly_traj::MinJerkOpt jerkOpt_;
     ConstraintPoints cps_;
+
+    // 地面机器人: 使用 2D inflation buffer 做碰撞判定, 与 dyn_a_star / SAFETY guard 一致
+    // (3D buffer 在 z=0.7 高度上往往查不到, 因为障碍点云不一定覆盖该高度)
+    inline int isOccupied2d(const Eigen::Vector3d &p)
+    {
+      // 出界 (-1) 视为 free (0), 避免出界点被 cast bool=true 伪造障碍.
+      int r = grid_map_->getInflateOccupancy2d(Eigen::Vector2d(p(0), p(1)));
+      return r > 0 ? 1 : 0;
+    }
     // PtsChk_t pts_check_;
 
     int drone_id_;

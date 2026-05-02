@@ -658,12 +658,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       else
         flag_random_poly_init = true;
 
-      // P2-B: 对齐原版 planFromGlobalTraj(10) — 单次失败不立即跳走,
-      // 在同一帧内最多重试 10 次, 第 1 次用确定多项式初始化, 后续启用随机扰动
+      // P2-B: 单次失败不立即跳走,
+      // 在同一帧内最多重试 3 次, 第 1 次用确定多项式初始化, 后续启用随机扰动
       // 以跨越 max_restarts/反弹卡死的局部坑。避免 FSM 重入延迟把短暂失败
       // 误升级为 EMERGENCY_STOP。
       bool success = false;
-      for (int i = 0; i < 10; ++i)
+      for (int i = 0; i < 3; ++i)
       {
         bool flag_random = flag_random_poly_init || (i > 0);
         if (callReboundReplan(true, flag_random))
@@ -877,10 +877,21 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             consecutive_init_collision_count_ = 0;
             changeFSMExecState(GEN_NEW_TRAJ, "FSM_FixG");
           }
-          else if (exec_state_ == REPLAN_TRAJ)
-          {
-              changeFSMExecState(REPLAN_TRAJ, "FSM");
-          }
+            else if (exec_state_ == REPLAN_TRAJ)
+            {
+              auto info = &planner_manager_->local_data_;
+              const double t_cur = (ros::Time::now() - info->start_time_).toSec();
+              if (info->use_minco_traj_ && t_cur >= 0.0 && t_cur < info->duration_ - 0.3)
+              {
+                ROS_WARN_THROTTLE(0.5, "[FSM] REPLAN failed, keep executing previous traj for %.2fs",
+                        info->duration_ - t_cur);
+                changeFSMExecState(EXEC_TRAJ, "FSM_REPLAN_FAIL_KEEP_EXEC");
+              }
+              else
+              {
+                changeFSMExecState(GEN_NEW_TRAJ, "FSM_REPLAN_FAIL_EXPIRED");
+              }
+            }
           // 否则保持planFromCurrentTraj()设置的状态（如ADJUST_POSE）
       }
 
