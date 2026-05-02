@@ -33,10 +33,24 @@ namespace ego_planner
     // Preparision 2: Trajectory related params
     t_now_ = ros::Time::now().toSec();
     piece_num_ = initT.size();
-    jerkOpt_.reset(iniState, finState, piece_num_);
+    fixed_z_ = iniState(2, 0);
+    Eigen::MatrixXd iniState2d = iniState;
+    Eigen::MatrixXd finState2d = finState;
+    iniState2d(2, 0) = fixed_z_;
+    iniState2d(2, 1) = 0.0;
+    iniState2d(2, 2) = 0.0;
+    finState2d(2, 0) = fixed_z_;
+    finState2d(2, 1) = 0.0;
+    finState2d(2, 2) = 0.0;
+    jerkOpt_.reset(iniState2d, finState2d, piece_num_);
     variable_num_ = 4 * (piece_num_ - 1) + 1;
     double x_init[variable_num_];
-    memcpy(x_init, initInnerPts.data(), initInnerPts.size() * sizeof(x_init[0]));
+    Eigen::MatrixXd initInnerPts2d = initInnerPts;
+    if (initInnerPts2d.cols() > 0)
+    {
+      initInnerPts2d.row(2).setConstant(fixed_z_);
+    }
+    memcpy(x_init, initInnerPts2d.data(), initInnerPts2d.size() * sizeof(x_init[0]));
     Eigen::Map<Eigen::VectorXd> Vt(x_init + initInnerPts.size(), initT.size());
     RealT2VirtualT(initT, Vt);
 
@@ -133,8 +147,10 @@ namespace ego_planner
             // [Fix J: 确定性 restart 扰动] 必须保留: amp=0 会让 3 次 restart 包同一盆地 → 毫无意义
             {
               double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
-              for (int k = 0; k < (int)initInnerPts.size(); ++k)
+              for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
                 x_init[k] += ((k % 2 == 0) ? amp : -amp);
+              for (int col = 0; col < initInnerPts2d.cols(); ++col)
+                x_init[col * 3 + 2] = fixed_z_;
             }
         }
       }
@@ -154,8 +170,10 @@ namespace ego_planner
           flag_still_unsafe = true;
           restart_nums++;
           double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
-          for (int k = 0; k < (int)initInnerPts.size(); ++k)
+          for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
             x_init[k] += ((k % 2 == 0) ? amp : -amp);
+          for (int col = 0; col < initInnerPts2d.cols(); ++col)
+            x_init[col * 3 + 2] = fixed_z_;
         }
       }
 
@@ -1288,7 +1306,7 @@ namespace ego_planner
   {
     PolyTrajOptimizer *opt = reinterpret_cast<PolyTrajOptimizer *>(func_data);
 
-    Eigen::Map<const Eigen::MatrixXd> P(x, 3, opt->piece_num_ - 1);
+    Eigen::Map<const Eigen::MatrixXd> P_raw(x, 3, opt->piece_num_ - 1);
     // Eigen::VectorXd T(Eigen::VectorXd::Constant(piece_nums, opt->t2T(x[n - 1]))); // same t
     Eigen::Map<const Eigen::VectorXd> t(x + (3 * (opt->piece_num_ - 1)), opt->piece_num_);
     Eigen::Map<Eigen::MatrixXd> gradP(grad, 3, opt->piece_num_ - 1);
@@ -1301,10 +1319,12 @@ namespace ego_planner
 
     opt->VirtualT2RealT(t, T); // Unbounded virtual time to real time
 
+    Eigen::MatrixXd P = P_raw;
+    if (P.cols() > 0)
+    {
+      P.row(2).setConstant(opt->fixed_z_);
+    }
     opt->jerkOpt_.generate(P, T); // Generate trajectory from {P,T}
-    
-    // Force 2D: Clear Z component in coefficient matrix immediately after generation
-    opt->jerkOpt_.get_gdC().col(2).setZero();
 
     opt->initAndGetSmoothnessGradCost2PT(gradT, smoo_cost); // Smoothness cost
 

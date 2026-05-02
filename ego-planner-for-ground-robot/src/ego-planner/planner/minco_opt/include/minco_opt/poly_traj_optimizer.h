@@ -87,6 +87,7 @@ namespace ego_planner
     int variable_num_;       // optimization variables
     int piece_num_;          // poly traj piece numbers
     int iter_num_;           // iteration of the solver
+    double fixed_z_{0.0};     // locked planning plane height for ground robots
     std::vector<double> min_ellip_dist2_; // min trajectory distance in swarm
     bool touch_goal_;
     struct MultitopologyData_t

@@ -50,7 +50,7 @@
     <!--always set to 1.5 times grater than sensing horizen-->
     <!-- 7.5 在密集障碍区让 local target 太远, BVP 时间分配过长触发 COST_NAN; 6.0 更稳 -->
     <!-- 修复 E: 6.0 时尾段 ~2m 不可见 → 缩到 4.5 让 finelyCheck 全段校验更稳 -->
-    <arg name="planning_horizon" value="4.0" />
+    <arg name="planning_horizon" value="5.0" />
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->

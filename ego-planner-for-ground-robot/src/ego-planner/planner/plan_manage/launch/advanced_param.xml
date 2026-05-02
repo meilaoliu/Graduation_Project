@@ -169,7 +169,7 @@
          满足采样不漏障碍的需求, 同时控制 LBFGS 单次代价 -->
     <param name="optimization/constraint_points_perPiece" value="6" type="int"/>
     <!-- 修复 (穿障): 1500 时仍有 SAFETY 期间 Replan 抢救, 上调到 2500 强约束 -->
-    <param name="optimization/weight_obstacle" value="1200.0" type="double"/>
+    <param name="optimization/weight_obstacle" value="1000.0" type="double"/>
     <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
     <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
     <!-- 修复 D: weight_curv 500 让代价面过陡, 初值偏差就炸 → 中间值 250 -->
@@ -179,7 +179,7 @@
     <param name="optimization/weight_time" value="300.0" type="double"/>
     <!-- 修复 (穿障): clearance 过小时 cost 梯度太弱, 0.13 → 0.18 抬高安全余量 -->
     <param name="optimization/obstacle_clearance" value="0.15" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="0.30" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.25" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
     
     <!-- MPC 控制器参数 -->

@@ -1087,23 +1087,31 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     is_target_receive = false;
 
 
-    bool success = callReboundReplan(false, false);
-
-    if (!success)
+    bool success = false;
+    if (planner_manager_->pp_.use_minco_)
     {
+      // MINCO previous-traj init is noisy in straight replans; polynomial init is the stable path here.
       success = callReboundReplan(true, false);
-      //changeFSMExecState(EXEC_TRAJ, "FSM");
       if (!success)
       {
         success = callReboundReplan(true, true);
+      }
+    }
+    else
+    {
+      success = callReboundReplan(false, false);
+      if (!success)
+      {
+        success = callReboundReplan(true, false);
+        //changeFSMExecState(EXEC_TRAJ, "FSM");
         if (!success)
         {
-          return false;
+          success = callReboundReplan(true, true);
         }
       }
     }
 
-    return true;
+    return success;
   }
 
   void EGOReplanFSM::checkCollisionCallback(const ros::TimerEvent &e)

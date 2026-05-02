@@ -656,7 +656,9 @@ namespace ego_planner
         };
         sanitize(start_vel, pp_.max_vel_, "start_vel");
         sanitize(start_acc, pp_.max_acc_, "start_acc");
-        // 起点 z 维 (差速车实际为 0) 强制清零, 避免 3D 残值污染
+        const double fixed_z = start_pt(2);
+        local_target_pt(2) = fixed_z;
+        local_target_vel(2) = 0.0;
         start_vel(2) = 0.0;
         start_acc(2) = 0.0;
 
@@ -1022,12 +1024,15 @@ namespace ego_planner
             return poly_traj::Trajectory(durations, coeffs);
         };
 
-        double max_v = 0.0, max_a = 0.0, max_w = 0.0;
+        double max_v = 0.0, max_a = 0.0, max_w = 0.0, max_z_err = 0.0;
+        const double fixed_z = traj.getPos(0.0)(2);
         const double dt = 0.05;
         for (double t = 0.0; t <= traj.getTotalDuration(); t += dt)
         {
+            Eigen::Vector3d pos = traj.getPos(t);
             Eigen::Vector3d vel = traj.getVel(t);
             Eigen::Vector3d acc = traj.getAcc(t);
+            max_z_err = std::max(max_z_err, std::abs(pos(2) - fixed_z));
             const double speed = vel.head<2>().norm();
             max_v = std::max(max_v, speed);
             max_a = std::max(max_a, acc.head<2>().norm());
@@ -1036,6 +1041,11 @@ namespace ego_planner
                 const double cross = vel(0) * acc(1) - vel(1) * acc(0);
                 max_w = std::max(max_w, std::abs(cross) / (speed * speed));
             }
+        }
+        if (max_z_err > 0.03)
+        {
+            ROS_WARN("[MINCO_REJECT] z drift %.3fm exceeds 2D plane tolerance", max_z_err);
+            return false;
         }
 
         const double vel_scale = max_v / std::max(0.1, pp_.max_vel_ * 0.98);
