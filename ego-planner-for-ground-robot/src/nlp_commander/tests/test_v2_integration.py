@@ -7,8 +7,10 @@ V2系统集成测试，模拟完整流程但不依赖ROS
 import sys
 import os
 
-# 添加utils模块到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+# 添加 nlp_commander 包根目录到路径
+PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, PACKAGE_DIR)
 
 from utils.llm_utils import LLMClient
 from utils.path_planner import PathPlanner
@@ -161,15 +163,42 @@ class MockV2Commander:
         if "error" in llm_response:
             return llm_response["error"]
         
-        if llm_response.get("success") and llm_response.get("function_name") == "navigate_robot_with_path":
-            # 执行导航请求
-            args = llm_response["arguments"]
+        if llm_response.get("success") and "parsed" in llm_response:
+            parsed = llm_response["parsed"]
+            args = {
+                "waypoint_sequence": self._extract_target_names(parsed.get("target_devices", [])),
+                "task_description": parsed.get("task_description", command),
+            }
             return self.handle_navigation_request(
                 waypoint_sequence=args.get("waypoint_sequence", []),
                 task_description=args.get("task_description", "")
             )
         
         return "❌ LLM响应格式错误"
+
+    def _extract_target_names(self, target_devices: list) -> list:
+        """从新版 LLM JSON 中提取目标设备名称。"""
+        normalized_devices = []
+        for index, item in enumerate(target_devices):
+            if isinstance(item, dict):
+                name = item.get("name")
+                priority = item.get("priority", index + 1)
+            else:
+                name = str(item)
+                priority = index + 1
+
+            if not name:
+                continue
+
+            try:
+                priority_value = int(priority)
+            except (TypeError, ValueError):
+                priority_value = index + 1
+
+            normalized_devices.append((priority_value, name))
+
+        normalized_devices.sort(key=lambda item: item[0])
+        return [name for _, name in normalized_devices]
 
 def test_v2_integration():
     """测试V2系统集成"""

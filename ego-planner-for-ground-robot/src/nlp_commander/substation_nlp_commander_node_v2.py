@@ -8,11 +8,17 @@
 import rospy
 import sys
 import os
+import queue
+import threading
 
-# 添加utils模块到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+from std_msgs.msg import String
 
-from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager
+# 确保从包目录加载本地 utils 模块
+PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+if PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, PACKAGE_DIR)
+
+from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager, SegmentScheduler
 
 class SubstationNlpCommanderV2:
     """变电站智能巡检指挥官 V2.0"""
@@ -30,24 +36,62 @@ class SubstationNlpCommanderV2:
             on_waypoint_reached=self.on_waypoint_reached,
             on_task_completed=self.on_task_completed
         )
+
+        # 全局轨迹分段调度器 (新流程)
+        self.use_global_traj = bool(rospy.get_param('~use_global_traj', True))
+        if self.use_global_traj and SegmentScheduler is not None:
+            self.segment_scheduler = SegmentScheduler(
+                graph=self.path_planner.graph,
+                get_current_xy=self.waypoint_manager.get_current_coordinates,
+                say=lambda m: self._say(m),
+            )
+            rospy.loginfo("已启用全局轨迹分段调度模式 (use_global_traj=True)")
+        else:
+            self.segment_scheduler = None
+            rospy.loginfo("使用经典逐航点导航模式 (use_global_traj=False)")
+
+        # 聊天通道：与 Web Dashboard / 其他外部 UI 双向交互
+        self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._chat_out_pub = rospy.Publisher('/chat_out', String, queue_size=20)
+        rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
         
         rospy.loginfo("变电站智能巡检指挥官 V2.0 已就绪")
+
+    # ------------------------- 聊天通道 -------------------------
+    def _chat_in_cb(self, msg: String):
+        """来自 /chat_in (例如 Web Dashboard 用户输入) 的指令。"""
+        text = (msg.data or "").strip()
+        if not text:
+            return
+        rospy.loginfo(f"[chat_in] {text}")
+        self._cmd_queue.put(('chat', text))
+
+    def _say(self, text: str):
+        """同时输出到终端与 /chat_out，供外部 UI 显示。"""
+        if text is None:
+            return
+        print(text)
+        try:
+            self._chat_out_pub.publish(String(data=str(text)))
+        except Exception:
+            pass
     
     def on_waypoint_reached(self, waypoint_name: str):
         """航点到达回调"""
-        print(f"✅ 已到达设备点: {waypoint_name}")
+        self._say(f"✅ 已到达设备点: {waypoint_name}")
     
     def on_task_completed(self):
         """任务完成回调"""
-        print("🎉 巡检任务完成！准备接收新指令...")
+        self._say("🎉 巡检任务完成！准备接收新指令...")
     
-    def handle_navigation_request(self, waypoint_sequence: list, task_description: str) -> str:
+    def handle_navigation_request(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> str:
         """
         处理导航请求
         
         Args:
-            waypoint_sequence: 航点序列列表
+            waypoint_sequence: 目标设备序列列表
             task_description: 任务描述
+            task_type: LLM输出的任务类型，可选
             
         Returns:
             处理结果信息
@@ -72,11 +116,11 @@ class SubstationNlpCommanderV2:
         # 智能分析航点序列，确定最佳路径规划策略
         planned_path = []
         
-        if not waypoint_sequence:
+        if not waypoint_sequence and task_type != "full_inspection":
             return "❌ 未提供有效的航点序列"
         
         # 分析任务类型和目标
-        task_analysis = self._analyze_waypoint_sequence(waypoint_sequence, task_description)
+        task_analysis = self._analyze_waypoint_sequence(waypoint_sequence, task_description, task_type)
         rospy.loginfo(f"任务分析结果: {task_analysis}")
         
         if task_analysis["type"] == "single_target":
@@ -96,11 +140,11 @@ class SubstationNlpCommanderV2:
             planned_path = self.path_planner.plan_full_inspection(current_pos)
             
         else:
-            # 直接使用用户指定的路径，但验证连通性
+            # 自定义多点任务保留用户或LLM给出的显式访问顺序
             user_targets = self._expand_and_validate_targets(waypoint_sequence)
             rospy.loginfo(f"自定义路径规划: {current_pos} -> {user_targets}")
             if user_targets:
-                planned_path = self.path_planner.plan_multi_target_path(current_pos, user_targets)
+                planned_path = self.path_planner.plan_ordered_targets_path(current_pos, user_targets)
         
         # 验证路径
         if not planned_path:
@@ -113,21 +157,59 @@ class SubstationNlpCommanderV2:
         # 计算路径距离
         path_distance = self.path_planner.get_path_distance(planned_path)
         
-        # 启动导航任务
-        result = self.waypoint_manager.start_navigation_task(planned_path, task_description)
+        # 根据目标设备集合生成停留标志：目标设备、起点和终点需要停留，过渡点仅通过。
+        stop_flags = self._assign_stop_flags(planned_path, task_analysis["targets"])
+
+        # 启动导航任务（按模式分支）
+        if self.segment_scheduler is not None:
+            # 解析 (name, (x,y), stop) 元组列表
+            wp_tuples = []
+            for name, stop in zip(planned_path, stop_flags):
+                coords = self.path_planner.graph.get_location_coordinates(name)
+                if coords is None:
+                    continue
+                wp_tuples.append((name, coords, stop))
+            if not wp_tuples:
+                return f"❌ 无法解析任何航点坐标: {planned_path}"
+            result = self.segment_scheduler.start_task(wp_tuples, task_description)
+        else:
+            result = self.waypoint_manager.start_navigation_task(
+                planned_path, task_description, stop_flags)
         
         # 添加路径信息
         result += f"\n📏 路径总距离: {path_distance:.1f}米"
         result += f"\n🛣️ 详细路径: {' → '.join(planned_path)}"
+        result += f"\n🛑 停留点: {' → '.join([name for name, stop in zip(planned_path, stop_flags) if stop])}"
         
         return result
+
+    def _assign_stop_flags(self, planned_path: list, target_devices: list) -> list:
+        """为全局 Waypoint 序列生成停留标志。"""
+        if not planned_path:
+            return []
+
+        target_set = set(target_devices)
+        last_index = len(planned_path) - 1
+        return [
+            index == 0 or index == last_index or waypoint_name in target_set
+            for index, waypoint_name in enumerate(planned_path)
+        ]
     
-    def _analyze_waypoint_sequence(self, waypoint_sequence: list, task_description: str) -> dict:
+    def _analyze_waypoint_sequence(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> dict:
         """分析航点序列，确定任务类型和目标"""
         
         # 根据任务描述和航点数量判断任务类型
         description_lower = task_description.lower()
         rospy.loginfo(f"分析任务: 描述='{task_description}', 航点={waypoint_sequence}")
+        normalized_task_type = (task_type or "").strip()
+
+        if normalized_task_type in {"single_target", "area_inspection", "full_inspection", "custom_path"}:
+            rospy.loginfo(f"采用LLM输出的任务类型: {normalized_task_type}")
+            if normalized_task_type == "full_inspection":
+                return {"type": "full_inspection", "targets": waypoint_sequence}
+
+            expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
+            return {"type": normalized_task_type, "targets": expanded_targets}
         
         # 完整巡检判断
         if any(keyword in description_lower for keyword in ["完整", "全面", "所有", "整个变电站", "巡检一圈"]):
@@ -217,6 +299,10 @@ class SubstationNlpCommanderV2:
         if "error" in llm_response:
             return llm_response["error"]
         
+        if llm_response.get("success") and "parsed" in llm_response:
+            return self._handle_structured_llm_result(llm_response["parsed"], command)
+
+        # 兼容旧版 Function Calling 测试桩或历史实现
         if llm_response.get("success") and llm_response.get("function_name") == "navigate_robot_with_path":
             # 执行导航请求
             args = llm_response["arguments"]
@@ -226,6 +312,51 @@ class SubstationNlpCommanderV2:
             )
         
         return "❌ LLM响应格式错误"
+
+    def _handle_structured_llm_result(self, parsed: dict, original_command: str) -> str:
+        """将 CoT + JSON 语义解析结果转换为路径规划请求。"""
+        task_type = parsed.get("task_type", "").strip()
+        task_description = parsed.get("task_description") or original_command
+        target_devices = parsed.get("target_devices", [])
+        target_names = self._extract_target_names(target_devices)
+
+        if task_type != "full_inspection" and not target_names:
+            return "❌ LLM未返回有效目标设备，请换一种更明确的巡检指令。"
+
+        result = self.handle_navigation_request(
+            waypoint_sequence=target_names,
+            task_description=task_description,
+            task_type=task_type,
+        )
+
+        reasoning = parsed.get("reasoning")
+        if reasoning:
+            result += f"\n🧠 语义解析: {reasoning}"
+        return result
+
+    def _extract_target_names(self, target_devices: list) -> list:
+        """从LLM返回的target_devices字段中提取按优先级排序的设备名称。"""
+        normalized_devices = []
+        for index, item in enumerate(target_devices):
+            if isinstance(item, dict):
+                name = item.get("name")
+                priority = item.get("priority", index + 1)
+            else:
+                name = str(item)
+                priority = index + 1
+
+            if not name:
+                continue
+
+            try:
+                priority_value = int(priority)
+            except (TypeError, ValueError):
+                priority_value = index + 1
+
+            normalized_devices.append((priority_value, name))
+
+        normalized_devices.sort(key=lambda item: item[0])
+        return [name for _, name in normalized_devices]
     
     def show_help(self):
         """显示帮助信息"""
@@ -265,60 +396,97 @@ class SubstationNlpCommanderV2:
         print("🗺️ 变电站拓扑图结构:")
         print(self.path_planner.graph.visualize_graph())
     
-    def run(self):
-        """运行主循环"""
-        self.show_help()
-        
+    def _stdin_reader(self):
+        """后台线程：把 stdin 输入塞入命令队列。"""
         while not rospy.is_shutdown():
             try:
-                # 显示当前状态
-                status = self.waypoint_manager.get_current_status()
-                print(f"\n📍 当前位置: {status['current_position']}")
-                
-                # 获取用户输入
-                print("🎯 请输入巡检指令 > ", end="", flush=True)
-                command = input().strip()
-                
-                if not command:
-                    continue
-                
-                # 处理内置命令
-                if command.lower() == 'help':
-                    self.show_help()
-                    continue
-                elif command.lower() == 'status':
-                    self.show_status()
-                    continue
-                elif command.lower() == 'graph':
-                    self.show_graph_info()
-                    continue
-                elif command.lower() == 'stop':
-                    result = self.waypoint_manager.stop_current_task()
-                    print(f"📋 {result}")
-                    continue
-                elif command.lower() == 'pause':
-                    result = self.waypoint_manager.pause_current_task()
-                    print(f"📋 {result}")
-                    continue
-                elif command.lower() == 'resume':
-                    result = self.waypoint_manager.resume_current_task()
-                    print(f"📋 {result}")
-                    continue
-                
-                # 使用LLM处理巡检指令
-                print("🔄 正在分析指令并规划路径...")
-                response = self.process_command_with_llm(command)
-                print(f"📋 {response}")
-                
+                # 提示符仍打印到终端，避免 dashboard-only 用户被打扰
+                print("\n🎯 请输入巡检指令 > ", end="", flush=True)
+                line = input()
+            except (EOFError, KeyboardInterrupt):
+                self._cmd_queue.put(('stdin', '__EOF__'))
+                return
+            self._cmd_queue.put(('stdin', line.strip()))
+
+    def _process_command(self, command: str, source: str = 'stdin'):
+        """处理一条指令（来自 stdin 或 /chat_in）。"""
+        if not command:
+            return
+        if source == 'chat':
+            self._say(f"📥 [chat] {command}")
+
+        low = command.lower().strip()
+        # 中英文同义词映射 (子串匹配，让 "停止巡检"/"暂停一下" 也能命中)
+        STOP_KWS    = ('stop', '停止', '停下', '停车', '中止', '取消任务')
+        PAUSE_KWS   = ('pause', '暂停')
+        RESUME_KWS  = ('resume', '继续', '恢复')
+        HELP_KWS    = ('help', '帮助', '?', '？')
+        STATUS_KWS  = ('status', '状态', '当前状态')
+        GRAPH_KWS   = ('graph', '地图', '查看地图')
+
+        def _hit(kws):
+            return any(k in low for k in kws)
+
+        if _hit(HELP_KWS):
+            self.show_help()
+            return
+        if _hit(STATUS_KWS):
+            self.show_status()
+            if self.segment_scheduler is not None:
+                self._say(f"🔧 调度器状态: {self.segment_scheduler.status()}")
+            return
+        if _hit(GRAPH_KWS):
+            self.show_graph_info()
+            return
+        if _hit(STOP_KWS):
+            if self.segment_scheduler is not None and self.segment_scheduler.is_active():
+                result = self.segment_scheduler.stop_task()
+            else:
+                result = self.waypoint_manager.stop_current_task()
+            self._say(f"📋 {result}")
+            return
+        if _hit(PAUSE_KWS):
+            result = self.waypoint_manager.pause_current_task()
+            self._say(f"📋 {result}")
+            return
+        if _hit(RESUME_KWS):
+            result = self.waypoint_manager.resume_current_task()
+            self._say(f"📋 {result}")
+            return
+
+        self._say("🔄 正在分析指令并规划路径...")
+        try:
+            response = self.process_command_with_llm(command)
+        except Exception as e:
+            response = f"❌ LLM 处理异常: {e}"
+            rospy.logerr(response)
+        self._say(f"📋 {response}")
+
+    def run(self):
+        """运行主循环（消费 stdin 与 /chat_in 两路指令）。"""
+        self.show_help()
+
+        stdin_thread = threading.Thread(target=self._stdin_reader, daemon=True)
+        stdin_thread.start()
+
+        while not rospy.is_shutdown():
+            try:
+                source, command = self._cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if command == '__EOF__':
+                rospy.loginfo("🔴 stdin 关闭，仅保留 /chat_in 通道")
+                continue
+
+            try:
+                self._process_command(command, source=source)
             except (rospy.ROSInterruptException, KeyboardInterrupt):
                 rospy.loginfo("🔴 用户终止，关闭巡检系统")
                 break
-            except EOFError:
-                rospy.loginfo("🔴 输入结束，关闭巡检系统")
-                break
             except Exception as e:
-                rospy.logerr(f"输入处理错误: {e}")
-                print("❌ 输入错误，请重试...")
+                rospy.logerr(f"指令处理错误: {e}")
+                self._say(f"❌ 指令处理出错: {e}")
 
 def main():
     """主函数"""

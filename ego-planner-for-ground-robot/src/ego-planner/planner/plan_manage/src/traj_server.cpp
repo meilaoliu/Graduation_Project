@@ -2,30 +2,45 @@
 #include "minco_opt/poly_traj_utils.hpp"
 #include "MPC.hpp"
 #include "nav_msgs/Odometry.h"
+#include "nav_msgs/Path.h"
 #include "geometry_msgs/Twist.h"
+#include "geometry_msgs/PoseStamped.h"
 #include "ego_planner/Bspline.h"
 #include "ego_planner/MINCOTraj.h"
 #include "std_msgs/UInt8.h"
 #include "std_msgs/UInt8MultiArray.h"
-#include "geometry_msgs/PoseStamped.h"
 #include "tf/transform_listener.h"
 #include "tf/transform_datatypes.h"
-//#include "quadrotor_msgs/PositionCommand.h"
 #include "std_msgs/Empty.h"
 #include "std_msgs/UInt8.h"
 #include "visualization_msgs/Marker.h"
 #include <ros/ros.h>
+#include <ros/package.h>
 #include "time.h"
+#include <fstream>
+#include <iomanip>
+#include <signal.h>
+#include <cmath>
+#include <sys/stat.h>
+#include <deque>
 
 #define PI 3.1415926
 #define N 15
 
 ros::Publisher vel_cmd_pub;
+ros::Publisher ref_path_pub;
+ros::Publisher actual_path_pub;
 
-//quadrotor_msgs::PositionCommand cmd;
 geometry_msgs::Twist cmd;
-double pos_gain[3] = {0, 0, 0};
-double vel_gain[3] = {0, 0, 0};
+nav_msgs::Path ref_path_msg;
+nav_msgs::Path actual_path_msg;
+
+// ========== 延时补偿 ==========
+bool use_delay_compensation_ = false;
+double delay_sec_ = 0.05;
+struct CtrlRecord { ros::Time stamp; double v; double w; };
+std::deque<CtrlRecord> ctrl_history_;
+// ========== End 延时补偿 ==========
 
 using ego_planner::UniformBspline;
 
@@ -48,6 +63,61 @@ tf::Quaternion quat;
 std_msgs::UInt8 is_adjust_pose;
 std_msgs::UInt8 dir;
 
+// ==========  data logging ==========
+struct CmdLogEntry {
+    double time;
+    double ref_x, ref_y, ref_yaw;   // reference position & heading from trajectory
+    double ref_vx, ref_vy;
+    double ref_ax, ref_ay;
+    double ref_speed;
+    double ref_curvature;
+    double cmd_v, cmd_w;
+    double odom_x, odom_y, odom_yaw;
+};
+std::vector<CmdLogEntry> cmd_log_entries_;
+ros::Time system_start_time_;
+bool system_start_time_set_ = false;
+
+std::string getLogDir() {
+    std::string pkg_path = ros::package::getPath("ego_planner");
+    // pkg_path = .../src/ego-planner/planner/plan_manage
+    // target  = .../src/benchmark
+    std::string log_dir = pkg_path + "/../../../../src/benchmark";
+    // Resolve to canonical form
+    char resolved[PATH_MAX];
+    if (realpath(log_dir.c_str(), resolved)) {
+        log_dir = std::string(resolved);
+    }
+    mkdir(log_dir.c_str(), 0755);
+    return log_dir;
+}
+
+void saveCmdLogToFile() {
+    if (cmd_log_entries_.empty()) {
+        ROS_WARN("[TrajServer] No log entries to save.");
+        return;
+    }
+    std::string csv_path = getLogDir() + "/cmd_profile.csv";
+    std::ofstream csv_writer(csv_path, std::ios::out | std::ios::trunc);
+    csv_writer << "time,ref_x,ref_y,ref_yaw,ref_vx,ref_vy,ref_ax,ref_ay,ref_speed,ref_curvature,cmd_v,cmd_w,odom_x,odom_y,odom_yaw" << std::endl;
+    csv_writer << std::fixed << std::setprecision(6);
+    for (const auto &e : cmd_log_entries_) {
+        csv_writer << e.time << "," << e.ref_x << "," << e.ref_y << "," << e.ref_yaw << ","
+                   << e.ref_vx << "," << e.ref_vy << ","
+                   << e.ref_ax << "," << e.ref_ay << "," << e.ref_speed << ","
+                   << e.ref_curvature << "," << e.cmd_v << "," << e.cmd_w << ","
+                   << e.odom_x << "," << e.odom_y << "," << e.odom_yaw << std::endl;
+    }
+    csv_writer.close();
+    ROS_INFO("[TrajServer] Saved %zu log entries to %s", cmd_log_entries_.size(), csv_path.c_str());
+}
+
+void sigintHandler(int sig) {
+    saveCmdLogToFile();
+    ros::shutdown();
+}
+// ========== End logging ==========
+
 enum DIRECTION {POSITIVE=0,NEGATIVE=1};
 
 // yaw control
@@ -61,6 +131,50 @@ std_msgs::UInt8 stop_command;
 ////time record
 clock_t start_clock,end_clock;
 double duration;
+
+// 参考/实际轨迹的 Path 在 MPC 控制循环中逐点累积，不在此处整体发布
+// 这样在持续重规划时两条轨迹都不会被清空
+
+// RK4 延时补偿：将观测状态前推 delay_sec_
+Eigen::Vector3d delayCompensate(const Eigen::Vector3d& x_obs, ros::Time obs_time)
+{
+    if (!use_delay_compensation_ || ctrl_history_.empty())
+        return x_obs;
+
+    ros::Time t_start = obs_time;
+    Eigen::Vector3d x = x_obs;
+    double dt_rk = 0.005; // RK4 步长 5ms
+
+    for (double t_acc = 0.0; t_acc < delay_sec_; t_acc += dt_rk)
+    {
+        ros::Time t_now = t_start + ros::Duration(t_acc);
+        double step = std::min(dt_rk, delay_sec_ - t_acc);
+
+        // 查找历史缓冲区中最近的控制输入
+        double v_cmd = 0.0, w_cmd = 0.0;
+        for (auto it = ctrl_history_.rbegin(); it != ctrl_history_.rend(); ++it)
+        {
+            if (it->stamp <= t_now)
+            {
+                v_cmd = it->v;
+                w_cmd = it->w;
+                break;
+            }
+        }
+
+        // f(x, u) = [v*cos(phi), v*sin(phi), w]
+        auto dynamics = [](const Eigen::Vector3d& s, double v, double w) -> Eigen::Vector3d {
+            return Eigen::Vector3d(v * cos(s(2)), v * sin(s(2)), w);
+        };
+
+        Eigen::Vector3d k1 = dynamics(x, v_cmd, w_cmd);
+        Eigen::Vector3d k2 = dynamics(x + 0.5 * step * k1, v_cmd, w_cmd);
+        Eigen::Vector3d k3 = dynamics(x + 0.5 * step * k2, v_cmd, w_cmd);
+        Eigen::Vector3d k4 = dynamics(x + step * k3, v_cmd, w_cmd);
+        x += (step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+    }
+    return x;
+}
 
 void bsplineCallback(ego_planner::BsplineConstPtr msg)
 {
@@ -95,11 +209,8 @@ void bsplineCallback(ego_planner::BsplineConstPtr msg)
 
   traj_duration_ = traj_[0].getTimeSum();
 
-  // B 样条模式：只有当 FSM 使用 B 样条优化器时才会收到此消息
-  // MINCO 模式下会收到 MINCOTraj 消息，不会进入此回调
   use_minco_traj_ = false;
   receive_traj_ = true;
-
 }
 
 void mincoTrajCallback(ego_planner::MINCOTrajConstPtr msg)
@@ -173,11 +284,11 @@ void MPC_calculate(double &t_cur)
     std::vector<Eigen::Vector3d> X_r;
     std::vector<Eigen::Vector2d> U_r;
     Eigen::MatrixXd u_k;
-    Eigen::Vector3d pos_r,pos_r_1,pos_final,v_r_1,v_r_2,X_k;
+    Eigen::Vector3d pos_r,pos_final,v_r_1,X_k;
     Eigen::Vector2d u_r;
-    Eigen::Vector3d x_r,x_r_1,x_r_2;
+    Eigen::Vector3d x_r;
     double v_linear_1,w;
-    double t_k,t_k_1;
+    double t_k;
 
     //ROS_INFO("Run to here!");
 
@@ -218,8 +329,6 @@ void MPC_calculate(double &t_cur)
         yaw_start = atan2(vel_start(1), vel_start(0));
     }
 
-    bool is_orientation_adjust=false;
-    double orientation_adjust=0;
     pos_final = pos_final_3d;
 
     // forward_only 模式：检查轨迹方向与车头方向
@@ -257,106 +366,90 @@ void MPC_calculate(double &t_cur)
         is_orientation_init=true;
         for(int i=0;i<N;i++)
         {
-
             t_k = t_cur+i*t_step;
-            t_k_1 = t_cur+(i+1)*t_step;
 
-            // 根据轨迹类型获取位置和速度
+            Eigen::Vector3d acc_r;
             if (use_minco_traj_)
             {
-              pos_r = minco_traj_->getPos(t_k);
-              pos_r_1 = minco_traj_->getPos(t_k_1);
-              v_r_1 = minco_traj_->getVel(t_k);
-              v_r_2 = minco_traj_->getVel(t_k_1);
+                pos_r = minco_traj_->getPos(std::min(t_k, traj_duration_));
+                v_r_1 = minco_traj_->getVel(std::min(t_k, traj_duration_));
+                acc_r  = minco_traj_->getAcc(std::min(t_k, traj_duration_));
             }
             else
             {
-            pos_r = traj_[0].evaluateDeBoor(t_k);
-            pos_r_1 = traj_[0].evaluateDeBoor(t_k_1);
-              v_r_1 = traj_[1].evaluateDeBoor(t_k);
-              v_r_2 = traj_[1].evaluateDeBoor(t_k_1);
+                pos_r  = traj_[0].evaluateDeBoor(std::min(t_k, traj_duration_));
+                v_r_1  = traj_[1].evaluateDeBoor(std::min(t_k, traj_duration_));
+                acc_r  = traj_[2].evaluateDeBoor(std::min(t_k, traj_duration_));
             }
 
             x_r(0) = pos_r(0);
             x_r(1) = pos_r(1);
 
-            v_r_1(2)=0;
-            v_r_2(2)=0;
-            v_linear_1 = v_r_1.norm();
-            if((t_k-traj_duration_)>=0)
+            v_r_1(2) = 0;
+            acc_r(2) = 0;
+            double vx = v_r_1(0), vy = v_r_1(1);
+            double ax = acc_r(0), ay = acc_r(1);
+            double v_sq = vx * vx + vy * vy;
+            v_linear_1 = std::sqrt(v_sq);
+
+            // 参考航向角
+            if (v_linear_1 > 0.1)
             {
-                x_r(2) = atan2((pos_r-pos_final)(1),(pos_r-pos_final)(0));
+                x_r(2) = atan2(vy, vx);
             }
-            else
+            else if (t_k < traj_duration_)
             {
-                //x_r(2) = atan2((pos_r_1-pos_r)(1),(pos_r_1-pos_r)(0));
-                x_r(2) = atan2(v_r_1(1),v_r_1(0));
-            }
-
-
-
-            double yaw1 = atan2(v_r_1(1),v_r_1(0));
-            double yaw2 = atan2(v_r_2(1),v_r_2(0));
-
-            if(abs(yaw2-yaw1)>PI)
-            {
-                //ROS_WARN("orientation suddenly change !");
-                //cout<<"current index : "<<i+1<<endl;
-                //cout<<"yaw 1 : "<<yaw1<<endl;
-                //cout<<"yaw 2 : "<<yaw2<<endl;
-                is_orientation_adjust = true;
-                if((yaw2-yaw1)<0)
-                {
-                    orientation_adjust = 2*PI;
-                    w = (2*PI+(yaw2-yaw1))/t_step;
-                }
+                double t_look = std::min(t_k + 0.5, traj_duration_);
+                Eigen::Vector3d pos_look;
+                if (use_minco_traj_)
+                    pos_look = minco_traj_->getPos(t_look);
                 else
-                {
-                    w = ((yaw2-yaw1)-2*PI)/t_step;
-                    orientation_adjust = -2*PI;
-                }
+                    pos_look = traj_[0].evaluateDeBoor(t_look);
+                x_r(2) = atan2((pos_look - pos_r)(1), (pos_look - pos_r)(0));
             }
             else
             {
-                w = (yaw2-yaw1)/t_step;
+                x_r(2) = atan2((pos_r - pos_final)(1), (pos_r - pos_final)(0));
             }
 
-            if(is_orientation_adjust==true)
+            // 微分平坦公式计算参考角速度: omega = (vx*ay - vy*ax) / (vx^2 + vy^2)
+            if (v_sq > 0.01)
+                w = (vx * ay - vy * ax) / v_sq;
+            else
+                w = 0.0;
+
+            // 航向角连续性修正 (unwrap)
+            if (i > 0)
             {
-                //cout<<"orientation before adjust : "<< x_r(2)<<endl;
-                x_r(2) +=orientation_adjust;
-                //cout<<"orientation after adjust : "<< x_r(2)<<endl;
+                double d_yaw = x_r(2) - X_r[i-1](2);
+                if (d_yaw > PI) x_r(2) -= 2 * PI;
+                else if (d_yaw < -PI) x_r(2) += 2 * PI;
             }
 
             u_r(0) = v_linear_1;
             u_r(1) = w;
-//                if(t_c>(tp-5*t_step))
-//                {
-//                    cout<<"Ur "<<i+1<<" : "<<endl<<u_r<<endl;
-//                    cout<<"Xr "<<i+1<<" : "<<endl<<x_r<<endl;
-//                }
             X_r.push_back(x_r);
             U_r.push_back(u_r);
         }
 
-        //X_k(0) = odom_map.pose.pose.position.x - my_map.info.origin.position.x;
-        //X_k(1) = odom_map.pose.pose.position.y - my_map.info.origin.position.y;
-        X_k(0) = odom_pos_(0);
-        X_k(1) = odom_pos_(1);
-        if(yaw/X_r[0](2)<0&&abs(yaw)>(PI*5/6))
+        // 延时补偿：将里程计状态前推 delay_sec_
+        Eigen::Vector3d x_obs(odom_pos_(0), odom_pos_(1), yaw);
+        Eigen::Vector3d x_comp = delayCompensate(x_obs, ros::Time::now() - ros::Duration(delay_sec_));
+        X_k(0) = x_comp(0);
+        X_k(1) = x_comp(1);
+
+        // 航向角与参考序列对齐（处理 ±pi 跳变）
+        double yaw_comp = x_comp(2);
+        if(yaw_comp / X_r[0](2) < 0 && abs(yaw_comp) > (PI * 5.0 / 6.0))
         {
-            if(yaw<0)
-            {
-                X_k(2) = yaw + 2*PI;
-            }
+            if(yaw_comp < 0)
+                X_k(2) = yaw_comp + 2 * PI;
             else
-            {
-                X_k(2) = yaw - 2*PI;
-            }
+                X_k(2) = yaw_comp - 2 * PI;
         }
         else
         {
-            X_k(2) = yaw;
+            X_k(2) = yaw_comp;
         }
         // cout<<"xr  : "<<X_r[0]<<endl;
         // cout<<"xk  : "<<X_k<<endl;
@@ -394,34 +487,59 @@ void MPC_calculate(double &t_cur)
         }
 
         cmd.angular.z = u_k.col(0)(1);
-       static int conut1 = 0;
-       conut1+=1;
-       // 降低调试输出频率，每200次输出一次关键信息
-       if(conut1%200==0)
-       {
-           ROS_INFO("[MPC] cmd: v=%.2fm/s, w=%.2frad/s | ref: v=%.2f, w=%.2f", 
-                    u_k.col(0)(0), u_k.col(0)(1), U_r[0](0), U_r[0](1));
-           conut1=0;
-       }
-
+        static int conut1 = 0;
+        conut1 += 1;
+        if(conut1 % 200 == 0)
+        {
+            ROS_INFO("[MPC] cmd: v=%.2fm/s, w=%.2frad/s | ref: v=%.2f, w=%.2f",
+                     u_k.col(0)(0), u_k.col(0)(1), U_r[0](0), U_r[0](1));
+            conut1 = 0;
+        }
 
         vel_cmd_pub.publish(cmd);
-//        control_times+=1;
-//        //cout<<"control_times : "<<control_times<<endl;
-//        //cout<<"current t : "<<t_c<<endl;
-//        if(t_c>tp)
-//        {
-//            is_trajectory_trace=false;
-//            is_orientation_init=false;
-//            web_cmd_vel.angular.z = 0;
-//            web_cmd_vel.linear.x = 0;
-//            web_cmd_pub.publish(web_cmd_vel);
-//            control_times=0;
-//        }
-        //ros::Time t_end = ros::Time::now();
-        //ROS_INFO("control total time : %5.3f ms",(t_end-t_start).toSec()*1000);
-   // }
 
+        // 记录控制输入到延时补偿缓冲区
+        CtrlRecord rec;
+        rec.stamp = ros::Time::now();
+        rec.v = cmd.linear.x;
+        rec.w = cmd.angular.z;
+        ctrl_history_.push_back(rec);
+        while (!ctrl_history_.empty() &&
+               (rec.stamp - ctrl_history_.front().stamp).toSec() > 0.5)
+            ctrl_history_.pop_front();
+
+        // 累积当前参考点（MPC 此刻正在跟踪的参考位置）
+        {
+            Eigen::Vector3d ref_pos;
+            if (use_minco_traj_)
+                ref_pos = minco_traj_->getPos(std::min(t_cur, traj_duration_));
+            else
+                ref_pos = traj_[0].evaluateDeBoor(std::min(t_cur, traj_duration_));
+            geometry_msgs::PoseStamped rps;
+            rps.header.stamp = ros::Time::now();
+            rps.header.frame_id = "map";
+            rps.pose.position.x = ref_pos(0);
+            rps.pose.position.y = ref_pos(1);
+            rps.pose.position.z = ref_pos(2);
+            rps.pose.orientation.w = 1.0;
+            ref_path_msg.poses.push_back(rps);
+            ref_path_msg.header = rps.header;
+            ref_path_pub.publish(ref_path_msg);
+        }
+
+        // 累积实际轨迹点（里程计位置）
+        {
+            geometry_msgs::PoseStamped ps;
+            ps.header.stamp = ros::Time::now();
+            ps.header.frame_id = "map";
+            ps.pose.position.x = odom_pos_(0);
+            ps.pose.position.y = odom_pos_(1);
+            ps.pose.position.z = odom_pos_(2);
+            ps.pose.orientation.w = 1.0;
+            actual_path_msg.poses.push_back(ps);
+            actual_path_msg.header = ps.header;
+            actual_path_pub.publish(actual_path_msg);
+        }
 }
 
 void stopCallback(std_msgs::UInt8ConstPtr msg)
@@ -498,12 +616,48 @@ void cmdCallback(const ros::TimerEvent &e)
 
     if (t_cur < traj_duration_ && t_cur >= 0.0)
     {
-        //ROS_INFO("MPC_Calculate!");
         start_clock = clock();
         MPC_calculate(t_cur);
         end_clock = clock();
         duration = (double)(end_clock - start_clock) / CLOCKS_PER_SEC *1000;
-        //ROS_INFO("Control times : %f ms",duration);
+
+        // ---- SUPER-style logging: record at control callback ----
+        if (!system_start_time_set_) {
+            system_start_time_ = time_s;
+            system_start_time_set_ = true;
+        }
+        CmdLogEntry entry;
+        entry.time = (time_s - system_start_time_).toSec();
+
+        Eigen::Vector3d ref_pos, ref_vel, ref_acc;
+        if (use_minco_traj_) {
+            ref_pos = minco_traj_->getPos(t_cur);
+            ref_vel = minco_traj_->getVel(t_cur);
+            ref_acc = minco_traj_->getAcc(t_cur);
+        } else {
+            ref_pos = traj_[0].evaluateDeBoor(t_cur);
+            ref_vel = traj_[1].evaluateDeBoor(t_cur);
+            ref_acc = traj_[2].evaluateDeBoor(t_cur);
+        }
+        entry.ref_x = ref_pos(0);
+        entry.ref_y = ref_pos(1);
+        double ref_spd = ref_vel.head<2>().norm();
+        entry.ref_yaw = (ref_spd > 0.05) ? atan2(ref_vel(1), ref_vel(0)) : yaw;
+        entry.ref_vx = ref_vel(0);
+        entry.ref_vy = ref_vel(1);
+        entry.ref_ax = ref_acc(0);
+        entry.ref_ay = ref_acc(1);
+        double v2 = ref_vel(0)*ref_vel(0) + ref_vel(1)*ref_vel(1);
+        entry.ref_speed = std::sqrt(v2);
+        double v3 = v2 * entry.ref_speed;
+        entry.ref_curvature = (v3 > 1e-6) ? (ref_vel(0)*ref_acc(1) - ref_vel(1)*ref_acc(0)) / v3 : 0.0;
+        entry.cmd_v = cmd.linear.x;
+        entry.cmd_w = cmd.angular.z;
+        entry.odom_x = odom_pos_(0);
+        entry.odom_y = odom_pos_(1);
+        entry.odom_yaw = yaw;
+        cmd_log_entries_.push_back(entry);
+        // ---- End logging ----
     }
     else if (t_cur >= traj_duration_)
     {
@@ -511,6 +665,16 @@ void cmdCallback(const ros::TimerEvent &e)
         cmd.linear.x = 0;
         vel_cmd_pub.publish(cmd);
         is_orientation_init=false;
+
+        // 轨迹结束后再发一次（latched 会保持显示供截图）
+        if (!actual_path_msg.poses.empty())
+        {
+            ros::Time now = ros::Time::now();
+            actual_path_msg.header.stamp = now;
+            actual_path_pub.publish(actual_path_msg);
+            ref_path_msg.header.stamp = now;
+            ref_path_pub.publish(ref_path_msg);
+        }
     }
     else
     {
@@ -524,7 +688,8 @@ void cmdCallback(const ros::TimerEvent &e)
 
 int main(int argc, char **argv)
 {
-  ros::init(argc, argv, "traj_server");
+  ros::init(argc, argv, "traj_server", ros::init_options::NoSigintHandler);
+  signal(SIGINT, sigintHandler);
   ros::NodeHandle node("~");
 
   std::string cmd_topic,pose_topic;
@@ -542,6 +707,15 @@ int main(int argc, char **argv)
 
   mpc_controller.MPC_init(node);
   vel_cmd_pub = node.advertise<geometry_msgs::Twist>("/cmd_vel", 50);
+  ref_path_pub = node.advertise<nav_msgs::Path>("/mpc/ref_path", 2, true);
+  actual_path_pub = node.advertise<nav_msgs::Path>("/mpc/actual_path", 2, true);
+
+  ros::param::param("/ego_planner_node/MPC/use_delay_compensation", use_delay_compensation_, false);
+  ros::param::param("/ego_planner_node/MPC/delay_ms", delay_sec_, 50.0);
+  delay_sec_ /= 1000.0;
+  ROS_INFO("[Traj server] delay_compensation=%s, delay=%.1fms",
+           use_delay_compensation_ ? "ON" : "OFF", delay_sec_ * 1000.0);
+
   stop_command.data = 0;
   dir.data = POSITIVE;
   t_step = 0.03;

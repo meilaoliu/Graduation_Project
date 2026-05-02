@@ -1,4 +1,5 @@
 #include "minco_opt/poly_traj_optimizer.h"
+#include <random>
 
 using namespace std;
 
@@ -26,14 +27,30 @@ namespace ego_planner
     int restart_nums = 0, rebound_times = 0;
     bool flag_force_return, flag_still_unsafe, flag_success;
     multitopology_data_.initial_obstacles_avoided = false;
+    // P1-A 修订: 进入新一轮优化前清空, 避免上一次调用残留覆盖本次诊断
+    last_failure_reason_ = "";
 
     // Preparision 2: Trajectory related params
     t_now_ = ros::Time::now().toSec();
     piece_num_ = initT.size();
-    jerkOpt_.reset(iniState, finState, piece_num_);
+    fixed_z_ = iniState(2, 0);
+    Eigen::MatrixXd iniState2d = iniState;
+    Eigen::MatrixXd finState2d = finState;
+    iniState2d(2, 0) = fixed_z_;
+    iniState2d(2, 1) = 0.0;
+    iniState2d(2, 2) = 0.0;
+    finState2d(2, 0) = fixed_z_;
+    finState2d(2, 1) = 0.0;
+    finState2d(2, 2) = 0.0;
+    jerkOpt_.reset(iniState2d, finState2d, piece_num_);
     variable_num_ = 4 * (piece_num_ - 1) + 1;
     double x_init[variable_num_];
-    memcpy(x_init, initInnerPts.data(), initInnerPts.size() * sizeof(x_init[0]));
+    Eigen::MatrixXd initInnerPts2d = initInnerPts;
+    if (initInnerPts2d.cols() > 0)
+    {
+      initInnerPts2d.row(2).setConstant(fixed_z_);
+    }
+    memcpy(x_init, initInnerPts2d.data(), initInnerPts2d.size() * sizeof(x_init[0]));
     Eigen::Map<Eigen::VectorXd> Vt(x_init + initInnerPts.size(), initT.size());
     RealT2VirtualT(initT, Vt);
 
@@ -71,6 +88,13 @@ namespace ego_planner
       double time_ms = (t2 - t1).toSec() * 1000;
       double total_time_ms = (t2 - t0).toSec() * 1000;
 
+      // [RESTART_DIAG] 每轮 LBFGS 退出后的状态: 用于查 max_restarts 真因
+      ROS_INFO_THROTTLE(0.5,
+                        "[RESTART_DIAG] iter=%d restart=%d rebound=%d lbfgs_ret=%d(%s) force_stop=%d cost=%.3e time_ms=%.1f",
+                        iter_num_, restart_nums, rebound_times, result,
+                        lbfgs::lbfgs_strerror(result), (int)force_stop_type_,
+                        final_cost, time_ms);
+
       /* ---------- get result and check collision ---------- */
       if (result == lbfgs::LBFGS_CONVERGENCE ||
           result == lbfgs::LBFGSERR_MAXIMUMITERATION ||
@@ -86,6 +110,33 @@ namespace ego_planner
 
             flag_success = true;
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f,total_t(ms)=%5.3f,cost=%5.3f\n\033[0m", iter_num_, time_ms, total_time_ms, final_cost);
+
+            // Log trajectory quality metrics
+            {
+              poly_traj::Trajectory traj = jerkOpt_.getTraj();
+              double max_v = 0, max_a = 0, max_k = 0;
+              double dt = 0.05;
+              for (double t = 0; t < traj.getTotalDuration(); t += dt)
+              {
+                Eigen::Vector3d v = traj.getVel(t);
+                Eigen::Vector3d a = traj.getAcc(t);
+                double vn = v.head<2>().norm();
+                double an = a.head<2>().norm();
+                max_v = std::max(max_v, vn);
+                max_a = std::max(max_a, an);
+                if (vn > 0.3)
+                {
+                  double cross = v(0) * a(1) - v(1) * a(0);
+                  double ki = std::abs(cross) / (vn * vn * vn);
+                  max_k = std::max(max_k, ki);
+                }
+              }
+              printf("[TRAJ_CAND] max_v=%.2f, max_a=%.2f, max_k=%.2f, duration=%.2f\n",
+                max_v, max_a, max_k, traj.getTotalDuration());
+
+              printf("[TRAJ_OK] max_v=%.2f, max_a=%.2f, max_k=%.2f, duration=%.2f\n",
+                     max_v, max_a, max_k, traj.getTotalDuration());
+            }
           }
           else
           {
@@ -93,6 +144,14 @@ namespace ego_planner
             flag_still_unsafe = true;
             restart_nums++;
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f, fine check collided, keep optimizing\n\033[0m", iter_num_, time_ms);
+            // [Fix J: 确定性 restart 扰动] 必须保留: amp=0 会让 3 次 restart 包同一盆地 → 毫无意义
+            {
+              double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+              for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
+                x_init[k] += ((k % 2 == 0) ? amp : -amp);
+              for (int col = 0; col < initInnerPts2d.cols(); ++col)
+                x_init[col * 3 + 2] = fixed_z_;
+            }
         }
       }
       else if (result == lbfgs::LBFGSERR_CANCELED)
@@ -105,10 +164,53 @@ namespace ego_planner
       {
         PRINTF_COND("iter=%d, time(ms)=%f, error\n", iter_num_, time_ms);
         ROS_WARN_COND(VERBOSE_OUTPUT, "Solver error. Return = %d, %s. Skip this planning.", result, lbfgs::lbfgs_strerror(result));
+        // [Fix J: ROUNDING_ERROR 同样确定性微扰动]
+        if (result == lbfgs::LBFGSERR_ROUNDING_ERROR && restart_nums < 3)
+        {
+          flag_still_unsafe = true;
+          restart_nums++;
+          double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+          for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
+            x_init[k] += ((k % 2 == 0) ? amp : -amp);
+          for (int col = 0; col < initInnerPts2d.cols(); ++col)
+            x_init[col * 3 + 2] = fixed_z_;
+        }
       }
 
     } while ((flag_still_unsafe && restart_nums < 3) ||
              (flag_force_return && force_stop_type_ == STOP_FOR_REBOUND && rebound_times <= 20));
+
+    // Update diagnostic tracking variables
+    last_lbfgs_result_ = flag_success ? 1 : 0;
+    last_restart_count_ = restart_nums;
+    last_rebound_count_ = rebound_times;
+    last_final_cost_ = final_cost;
+    if (!flag_success)
+    {
+      // P1-A 修订: 优先保留下游已经填好的细分标签
+      // (init_collision_dense / astar_init_err / astar_search_err / astar_input_diverged 等),
+      // 仅当还未被赋值时, 再退化到通用桶 max_restarts/max_rebounds/force_stop_error/optimization_failed.
+      const bool specific_already_set =
+          (last_failure_reason_ == "init_collision_dense") ||
+          (last_failure_reason_ == "astar_init_err") ||
+          (last_failure_reason_ == "astar_search_err") ||
+          (last_failure_reason_ == "astar_input_diverged");
+      if (!specific_already_set)
+      {
+        if (restart_nums >= 3)
+          last_failure_reason_ = "max_restarts";
+        else if (rebound_times > 20)
+          last_failure_reason_ = "max_rebounds";
+        else if (force_stop_type_ == STOP_FOR_ERROR)
+          last_failure_reason_ = "force_stop_error";
+        else
+          last_failure_reason_ = "optimization_failed";
+      }
+    }
+    else
+    {
+      last_failure_reason_ = "";
+    }
 
     return flag_success;
   }
@@ -217,6 +319,16 @@ namespace ego_planner
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
     int i_end = ConstraintPoints::two_thirds_id(init_points, touch_goal_); // only check closed 2/3 points.
 
+    // === 修复 A: 地面机器人 5s 轨迹的最后 1/3 (~2m) 不能省略校验,
+    // 否则 finelyCheck 直接漏过尾段的障碍 → FSM 当成 OBS_FREE 发布 →
+    // checkCollisionCallback 才在 t=2.x 处补救, 但车已开过去撞了。
+    // touch_goal 时 two_thirds_id 已 = cols-1; 这里只在非 touch_goal 路径下扩到 95%。
+    if (!touch_goal_)
+    {
+      int extended = init_points.cols() - 2; // 留 1 个尾点缓冲, 其余全检
+      if (extended > i_end) i_end = extended;
+    }
+
     PtsChk_t pts_check;
     if (!computePointsToCheck(traj, i_end, pts_check))
     {
@@ -284,15 +396,43 @@ namespace ego_planner
     {
       // Search from back to head
       Eigen::Vector3d in(init_points.col(segment_ids[i].second)), out(init_points.col(segment_ids[i].first));
+      // Skip A* if points have diverged (NaN/uninitialized -> spurious huge distance)
+      double dist = (in - out).norm();
+      if (!in.allFinite() || !out.allFinite() || dist > 50.0)
+      {
+        ROS_WARN_THROTTLE(1.0,
+                          "[finelyCheck] A* skipped: diverged points (dist=%.1f), drop segment %zu/%zu",
+                          dist, i + 1, segment_ids.size());
+        last_failure_reason_ = "astar_input_diverged";
+        // Drop this bad segment instead of aborting the whole optimization step.
+        // If all segments are bad, the loop ends with empty a_star_pathes and we
+        // fall through to OBS_FREE below, letting the caller proceed with the
+        // current init guess (the next iteration's roughlyCheck will re-evaluate).
+        segment_ids.erase(segment_ids.begin() + i);
+        --i;
+        continue;
+      }
       // Convert 3D to 2D for ground robot A*
       Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
-      bool ret = a_star_->AstarSearch(grid_map_->getResolution(), in_2d, out_2d);
-      if (ret) // SUCCESS
+      // P2-A + P1-A: 区分 INIT_ERR (端点无效) 与 SEARCH_ERR (扩展失败)
+      ASTAR_RET ret = a_star_->AstarSearchTyped(grid_map_->getResolution(), in_2d, out_2d);
+      if (ret == ASTAR_RET::SUCCESS)
       {
         a_star_pathes.push_back(a_star_->getPath());
       }
-      else if (!ret && i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+      else if (ret == ASTAR_RET::INIT_ERR)
       {
+        // 端点本身无效 (在障碍/出界): 丢段 + 记录可识别原因, 让上层 reReplan
+        ROS_WARN_THROTTLE(1.0,
+                          "[finelyCheck] A* INIT_ERR seg %zu/%zu, drop", i + 1, segment_ids.size());
+        last_failure_reason_ = "astar_init_err";
+        segment_ids.erase(segment_ids.begin() + i);
+        --i;
+        continue;
+      }
+      else if (i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+      {
+        last_failure_reason_ = "astar_search_err";
         segment_ids[i].second = segment_ids[i + 1].second;
         segment_ids.erase(segment_ids.begin() + i + 1);
         --i;
@@ -301,6 +441,7 @@ namespace ego_planner
       else
       {
         ROS_WARN_COND(VERBOSE_OUTPUT, "A-star error, force return!");
+        last_failure_reason_ = "astar_search_err";
         return CHK_RET::ERR;
       }
     }
@@ -599,6 +740,10 @@ namespace ego_planner
         {
           ROS_WARN("Local target in collision, skip this planning.");
 
+          // P1-A: 显式标记 "局部目标贴障碍" 失败 (与 max_restarts 区分)
+          last_failure_reason_ = "init_collision_dense";
+          // P1-B: 记录 force_stop 触发点, 便于事后回溯
+          ROS_DEBUG_NAMED("minco_force_stop", "STOP_FOR_ERROR @ roughlyCheck: terminal-in-obstacle");
           force_stop_type_ = STOP_FOR_ERROR;
           return false;
         }
@@ -616,15 +761,34 @@ namespace ego_planner
       {
         /*** a star search ***/
         Eigen::Vector3d in(cps_.points.col(segment_ids[i].second)), out(cps_.points.col(segment_ids[i].first));
+        // Skip A* if points have diverged (gradient explosion)
+        double dist = (in - out).norm();
+        if (dist > 50.0 || std::isnan(in(0)) || std::isnan(out(0)))
+        {
+          ROS_WARN("[roughlyCheck] A* skipped: diverged points (dist=%.1f)", dist);
+          segment_ids.erase(segment_ids.begin() + i);
+          --i;
+          continue;
+        }
         // Convert 3D to 2D for ground robot A*
         Eigen::Vector2d in_2d(in.x(), in.y()), out_2d(out.x(), out.y());
-        bool ret = a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ grid_map_->getResolution(), in_2d, out_2d);
-        if (ret) // SUCCESS
+        // P2-A + P1-A: 区分 INIT_ERR / SEARCH_ERR
+        ASTAR_RET ret = a_star_->AstarSearchTyped(/*(in-out).norm()/10+0.05*/ grid_map_->getResolution(), in_2d, out_2d);
+        if (ret == ASTAR_RET::SUCCESS)
         {
           a_star_pathes.push_back(a_star_->getPath());
         }
-        else if (!ret && i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+        else if (ret == ASTAR_RET::INIT_ERR)
         {
+          ROS_WARN_THROTTLE(1.0,
+                            "[roughlyCheck] A* INIT_ERR seg %zu/%zu, drop", i + 1, segment_ids.size());
+          last_failure_reason_ = "astar_init_err";
+          segment_ids.erase(segment_ids.begin() + i);
+          --i;
+        }
+        else if (i + 1 < segment_ids.size()) // SEARCH_ERR, connect the next segment
+        {
+          last_failure_reason_ = "astar_search_err";
           segment_ids[i].second = segment_ids[i + 1].second;
           segment_ids.erase(segment_ids.begin() + i + 1);
           --i;
@@ -633,6 +797,7 @@ namespace ego_planner
         else
         {
           ROS_ERROR_COND(VERBOSE_OUTPUT, "A-star error");
+          last_failure_reason_ = "astar_search_err";
           segment_ids.erase(segment_ids.begin() + i);
           --i;
         }
@@ -747,6 +912,10 @@ namespace ego_planner
           ROS_WARN_COND(VERBOSE_OUTPUT, "Failed to generate direction. It doesn't matter.");
       }
 
+      // P1-B: 记录 rebound 触发点 (含段数), 便于诊断 rebound 频率
+      ROS_DEBUG_NAMED("minco_force_stop",
+                      "STOP_FOR_REBOUND @ roughlyCheck: %zu collision segment(s)",
+                      segment_ids.size());
       force_stop_type_ = STOP_FOR_REBOUND;
       return true;
     }
@@ -1137,7 +1306,7 @@ namespace ego_planner
   {
     PolyTrajOptimizer *opt = reinterpret_cast<PolyTrajOptimizer *>(func_data);
 
-    Eigen::Map<const Eigen::MatrixXd> P(x, 3, opt->piece_num_ - 1);
+    Eigen::Map<const Eigen::MatrixXd> P_raw(x, 3, opt->piece_num_ - 1);
     // Eigen::VectorXd T(Eigen::VectorXd::Constant(piece_nums, opt->t2T(x[n - 1]))); // same t
     Eigen::Map<const Eigen::VectorXd> t(x + (3 * (opt->piece_num_ - 1)), opt->piece_num_);
     Eigen::Map<Eigen::MatrixXd> gradP(grad, 3, opt->piece_num_ - 1);
@@ -1150,10 +1319,12 @@ namespace ego_planner
 
     opt->VirtualT2RealT(t, T); // Unbounded virtual time to real time
 
+    Eigen::MatrixXd P = P_raw;
+    if (P.cols() > 0)
+    {
+      P.row(2).setConstant(opt->fixed_z_);
+    }
     opt->jerkOpt_.generate(P, T); // Generate trajectory from {P,T}
-    
-    // Force 2D: Clear Z component in coefficient matrix immediately after generation
-    opt->jerkOpt_.get_gdC().col(2).setZero();
 
     opt->initAndGetSmoothnessGradCost2PT(gradT, smoo_cost); // Smoothness cost
 
@@ -1179,11 +1350,24 @@ namespace ego_planner
             smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost,
             smoo_cost,
             obs_swarm_feas_qvar_costs(0), // Obstacle
-            obs_swarm_feas_qvar_costs(2), // Feasibility (V+A+K with SmoothedL1)
+            obs_swarm_feas_qvar_costs(2), // Feasibility (V+A+K)
             obs_swarm_feas_qvar_costs(3), // SqrVariance
             time_cost);
   }
-    return smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost;
+
+    double total_cost = smoo_cost + obs_swarm_feas_qvar_costs.sum() + time_cost;
+
+    // Detect NaN early and log which cost component caused it
+    if (std::isnan(total_cost) || std::isinf(total_cost))
+    {
+      ROS_ERROR("[COST_NAN] iter=%d | Smooth=%.2e | Obs=%.2e | Feas=%.2e | Dist=%.2e | Time=%.2e | T_min=%.4f | T_max=%.4f",
+                opt->iter_num_, smoo_cost,
+                obs_swarm_feas_qvar_costs(0), obs_swarm_feas_qvar_costs(2),
+                obs_swarm_feas_qvar_costs(3), time_cost,
+                T.minCoeff(), T.maxCoeff());
+    }
+
+    return total_cost;
   }
 
   int PolyTrajOptimizer::earlyExitCallback(void *func_data, const double *x, const double *g, const double fx, const double xnorm, const double gnorm, const double step, int n, int k, int ls)
@@ -1207,10 +1391,22 @@ namespace ego_planner
   template <typename EIGENVEC>
   void PolyTrajOptimizer::VirtualT2RealT(const EIGENVEC &VT, Eigen::VectorXd &RT)
   {
+    // Fix H2: Vt > V_MAX 区段改用 atan 软饶和, RT 硬上限 ≤ RT_MAX + SLOPE_MAX * V_WIDTH
+    // Fix H 原版线性外推 RT = 21*Vt 在 Vt=1e50 时 RT=2e51, 下游 T^4/T^6 仍会 inf
+    // atan 形式: Vt=V_MAX 值与一阶导连续, Vt→∞ 时 RT → 221+210 = 431
+    constexpr double V_MAX = 20.0;
+    constexpr double RT_MAX = (0.5 * V_MAX + 1.0) * V_MAX + 1.0; // = 221.0
+    constexpr double SLOPE_MAX = V_MAX + 1.0;                     // = 21.0
+    constexpr double V_WIDTH = 10.0;
+    constexpr double K_ATAN = M_PI / (2.0 * V_WIDTH);
     for (int i = 0; i < VT.size(); ++i)
     {
-      RT(i) = VT(i) > 0.0 ? ((0.5 * VT(i) + 1.0) * VT(i) + 1.0)
-                          : 1.0 / ((0.5 * VT(i) - 1.0) * VT(i) + 1.0);
+      if (VT(i) > V_MAX)
+        RT(i) = RT_MAX + (SLOPE_MAX / K_ATAN) * std::atan(K_ATAN * (VT(i) - V_MAX));
+      else if (VT(i) > 0.0)
+        RT(i) = ((0.5 * VT(i) + 1.0) * VT(i) + 1.0);
+      else
+        RT(i) = 1.0 / ((0.5 * VT(i) - 1.0) * VT(i) + 1.0);
     }
   }
 
@@ -1220,10 +1416,20 @@ namespace ego_planner
       const Eigen::VectorXd &gdRT, EIGENVECGD &gdVT,
       double &costT)
   {
+    // Fix H2: 与 atan 饶和配套, 导数 d(RT)/d(Vt) = SLOPE_MAX / (1 + (K_ATAN*(Vt-V_MAX))^2)
+    constexpr double V_MAX = 20.0;
+    constexpr double SLOPE_MAX = V_MAX + 1.0;
+    constexpr double V_WIDTH = 10.0;
+    constexpr double K_ATAN = M_PI / (2.0 * V_WIDTH);
     for (int i = 0; i < VT.size(); ++i)
     {
       double gdVT2Rt;
-      if (VT(i) > 0)
+      if (VT(i) > V_MAX)
+      {
+        double u = K_ATAN * (VT(i) - V_MAX);
+        gdVT2Rt = SLOPE_MAX / (1.0 + u * u);
+      }
+      else if (VT(i) > 0)
       {
         gdVT2Rt = VT(i) + 1.0;
       }
@@ -1443,7 +1649,6 @@ namespace ego_planner
                                                Eigen::Vector3d &gradv,
                                                double &costv)
   {
-    // Use cubic penalty for velocity (more stable than SmoothedL1 for large violations)
     double vpen = v.squaredNorm() - max_vel_ * max_vel_;
     if (vpen > 0)
     {
@@ -1458,7 +1663,6 @@ namespace ego_planner
                                                Eigen::Vector3d &grada,
                                                double &costa)
   {
-    // Use cubic penalty for acceleration (more stable than SmoothedL1 for large violations)
     double apen = a.squaredNorm() - max_acc_ * max_acc_;
     if (apen > 0)
     {
@@ -1483,9 +1687,9 @@ namespace ego_planner
     return false;
   }
 
-  // Curvature constraint with left-right separation and positiveSmoothedL1
-  // Uses eps_ to avoid singularity at low speeds
-  // IMPORTANT: Uses speed-dependent weight to prevent numerical explosion at low speeds
+  // Curvature constraint using Inequality Transformation (de-denominator method)
+  // Constraint: |κ| = |(v×a)/|v|³| ≤ κ_max
+  // Transformed: (v×a)² - κ_max² · |v|⁶ ≤ 0  (no division, no singularity at v=0)
   bool PolyTrajOptimizer::feasibilityGradCostK(const Eigen::Vector3d &vel,
                                                const Eigen::Vector3d &acc,
                                                Eigen::Vector3d &gradK_v,
@@ -1493,82 +1697,57 @@ namespace ego_planner
                                                double &costK)
   {
     double v2 = vel.squaredNorm();
-    
-    // Speed-dependent weight: curvature constraint is meaningless at very low speeds
-    // (e.g., during in-place rotation, curvature is mathematically infinite)
-    // Using smooth ramp: weight = saturate(v² / v_thresh²)
-    const double v_thresh_sq = 0.25;  // 0.5 m/s threshold
-    double speed_weight = std::min(1.0, v2 / v_thresh_sq);
-    
-    // Skip curvature constraint entirely if speed is very low
-    if (speed_weight < 0.01)
+    double cross = vel(0) * acc(1) - vel(1) * acc(0); // 2D cross product
+    double cross2 = cross * cross;
+
+    double k_lim_sqr = max_curv_ * max_curv_;
+    double v4 = v2 * v2;
+    double v6 = v4 * v2;
+
+    // P = (v×a)² - κ²·|v|⁶.  P > 0 means constraint violated.
+    double penalty = cross2 - k_lim_sqr * v6;
+
+    if (penalty > 0)
     {
-      gradK_v.setZero();
-      gradK_a.setZero();
-      costK = 0.0;
-      return false;
+      // === Huber 型分段惩罚: 防止 wei_curv 偏大或重 replan 边界处 |a|↑ 时
+      //     |grad| 直接爆到 1e8 量级、LBFGS 线搜索撞 ROUNDING_ERROR/COST_NAN ===
+      // penalty < THR: 平方惩罚 (灵敏)
+      // penalty ≥ THR: 线性惩罚, |dJ/dP| = 2·wei·THR 上界
+      const double THR = 0.3;
+      double dJ_dP;
+      if (penalty < THR)
+      {
+        costK = wei_curv_ * penalty * penalty;
+        dJ_dP = 2.0 * wei_curv_ * penalty;
+      }
+      else
+      {
+        costK = wei_curv_ * (THR * THR + 2.0 * THR * (penalty - THR));
+        dJ_dP = 2.0 * wei_curv_ * THR;
+      }
+
+      Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
+      Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
+
+      // dP/da = 2 · cross · B_vel
+      Eigen::Vector3d dP_da = 2.0 * cross * B_vel;
+      // dP/dv = -2 · cross · B_acc - 6 · κ² · |v|⁴ · v
+      Eigen::Vector3d dP_dv = -2.0 * cross * B_acc - 6.0 * k_lim_sqr * v4 * vel;
+
+      gradK_a = dJ_dP * dP_da;
+      gradK_v = dJ_dP * dP_dv;
+
+      static int curv_log_count = 0;
+      if (curv_log_count++ % 50 == 0)
+      {
+        double ki_approx = (v2 > 1e-6) ? sqrt(cross2) / (v2 * sqrt(v2)) : 0.0;
+        ROS_WARN("[CURV] ki~=%.3f, max=%.3f, |v|=%.3f, |a|=%.3f, penalty=%.3f, costK=%.3f",
+                 ki_approx, max_curv_, sqrt(v2), acc.norm(), penalty, costK);
+      }
+
+      return true;
     }
-    
-    // Use eps to avoid division by zero (no hard threshold)
-    double vel2_e = v2 + eps_;
-    double vel3_2_e = vel2_e * sqrt(vel2_e);
-    
-    // Cross product (v × a) in 2D: vx*ay - vy*ax
-    double cross = vel(0) * acc(1) - vel(1) * acc(0);
-    
-    // Curvature: κ = (v × a) / |v|³ (with eps regularization)
-    double curv = cross / vel3_2_e;
-    
-    // Left-right separation: κ ≤ κ_max and κ ≥ -κ_max
-    double violaCurL = curv - max_curv_;   // κ - κ_max > 0 means violation
-    double violaCurR = -curv - max_curv_;  // -κ - κ_max > 0 means violation
-    
-    gradK_v.setZero();
-    gradK_a.setZero();
-    costK = 0.0;
-    bool has_violation = false;
-    
-    // B matrix rotates 90 degrees: B * v = (-vy, vx, 0)
-    Eigen::Vector3d B_vel(-vel(1), vel(0), 0.0);
-    Eigen::Vector3d B_acc(-acc(1), acc(0), 0.0);
-    
-    // Precompute common terms for gradient
-    // ∂κ/∂v = B*a / |v|³_e - 3*κ*v / (v² + eps)
-    // ∂κ/∂a = B*v / |v|³_e
-    double vel2_e_inv = 1.0 / vel2_e;
-    Eigen::Vector3d dK_dv = B_acc / vel3_2_e - 3.0 * curv * vel * vel2_e_inv;
-    Eigen::Vector3d dK_da = B_vel / vel3_2_e;
-    
-    // Effective weight = base weight * speed modulation
-    double effective_wei = wei_curv_ * speed_weight;
-    
-    // Handle left constraint: κ ≤ κ_max
-    if (violaCurL > 0.0)
-    {
-      has_violation = true;
-      double penaL, penaDL;
-      positiveSmoothedL1(violaCurL, penaL, penaDL);
-      
-      // Gradient: effective_wei * penaD * ∂κ/∂v, effective_wei * penaD * ∂κ/∂a
-      gradK_v += effective_wei * penaDL * dK_dv;
-      gradK_a += effective_wei * penaDL * dK_da;
-      costK += effective_wei * penaL;
-    }
-    
-    // Handle right constraint: κ ≥ -κ_max (i.e., -κ ≤ κ_max)
-    if (violaCurR > 0.0)
-    {
-      has_violation = true;
-      double penaR, penaDR;
-      positiveSmoothedL1(violaCurR, penaR, penaDR);
-      
-      // Gradient: note the sign flip for -κ derivative
-      gradK_v += effective_wei * penaDR * (-dK_dv);
-      gradK_a += effective_wei * penaDR * (-dK_da);
-      costK += effective_wei * penaR;
-    }
-    
-    return has_violation;
+    return false;
   }
 
 
@@ -1645,8 +1824,9 @@ namespace ego_planner
     nh.param("optimization/max_vel", max_vel_, -1.0);
     nh.param("optimization/max_acc", max_acc_, -1.0);
     nh.param("optimization/max_jer", max_jer_, -1.0);
+    if (max_jer_ <= 0.0)
+      nh.param("optimization/max_jerk", max_jer_, -1.0);
     nh.param("optimization/max_curv", max_curv_, -1.0);
-    nh.param("optimization/velocity_singularity_eps", eps_, 0.01);  // eps to avoid division by zero
   }
 
   void PolyTrajOptimizer::setEnvironment(const GridMap::Ptr &map)
@@ -1654,7 +1834,7 @@ namespace ego_planner
     grid_map_ = map;
 
     a_star_.reset(new AStar);
-    a_star_->initGridMap(grid_map_, Eigen::Vector2i(100, 100)); // 2D for ground robot
+    a_star_->initGridMap(grid_map_, Eigen::Vector2i(500, 500)); // 2D for ground robot
   }
 
   void PolyTrajOptimizer::setControlPoints(const Eigen::MatrixXd &points)
@@ -1670,28 +1850,6 @@ namespace ego_planner
 
   void PolyTrajOptimizer::setUseMultitopologyTrajs(bool use_multitopology_trajs) { multitopology_data_.use_multitopology_trajs = use_multitopology_trajs; }
 
-  // Smoothed L1 penalty function (from Dftpav)
-  // When x < pe: polynomial smooth segment (C2 continuous)
-  // When x >= pe: linear segment with constant derivative = 1
-  void PolyTrajOptimizer::positiveSmoothedL1(const double &x, double &f, double &df)
-  {
-    const double pe = 1.0e-4;
-    const double half = 0.5 * pe;
-    const double f3c = 1.0 / (pe * pe);
-    const double f4c = -0.5 * f3c / pe;
-    const double d2c = 3.0 * f3c;
-    const double d3c = 4.0 * f4c;
 
-    if (x < pe)
-    {
-      f = (f4c * x + f3c) * x * x * x;
-      df = (d3c * x + d2c) * x * x;
-    }
-    else
-    {
-      f = x - half;
-      df = 1.0;
-    }
-  }
 
 } // namespace ego_planner

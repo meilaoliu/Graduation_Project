@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>变电站巡检仪表盘</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>🤖 变电站智能巡检仪表盘</h1>
+  <span id="conn-state" class="badge bad">未连接</span>
+</header>
+
+<main>
+  <!-- 状态面板 -->
+  <section class="panel" id="status-panel">
+    <h2>机器人状态</h2>
+    <div class="status-grid">
+      <div><label>位置</label><span id="pos">—</span></div>
+      <div><label>朝向</label><span id="yaw">—</span></div>
+      <div><label>线速度</label><span id="vlin">—</span></div>
+      <div><label>角速度</label><span id="vang">—</span></div>
+      <div><label>电量</label>
+        <div class="battery-bar">
+          <div id="battery-fill"></div>
+          <span id="battery-text">—</span>
+        </div>
+      </div>
+      <div><label>状态</label><span id="bstatus">—</span></div>
+      <div><label>剩余可走</label><span id="bdist">—</span></div>
+    </div>
+  </section>
+
+  <!-- 摄像头实时画面 -->
+  <section class="panel" id="cam-panel">
+    <h2>实时画面</h2>
+    <div class="cam-wrap">
+      <img id="cam-img" alt="camera feed" />
+      <div id="cam-empty">等待图像...</div>
+    </div>
+  </section>
+
+  <!-- 对话框 -->
+  <section class="panel" id="chat-panel">
+    <h2>对话框</h2>
+    <div id="chat-log"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" autocomplete="off"
+             placeholder="输入指令，例如：前往35kv配电箱2 ..." />
+      <button type="submit">发送</button>
+    </form>
+  </section>
+
+  <!-- 拍照画廊 -->
+  <section class="panel" id="photo-panel">
+    <h2>拍照记录</h2>
+    <div id="photo-grid"></div>
+  </section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

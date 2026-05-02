@@ -22,7 +22,7 @@ class WaypointManager:
         self.graph = SubstationGraph()
         
         # 任务队列和状态
-        self.waypoint_queue: List[Tuple[str, Tuple[float, float]]] = []
+        self.waypoint_queue: List[Tuple[str, Tuple[float, float], bool]] = []
         self.current_goal: Optional[PoseStamped] = None
         self.goal_tolerance = 2.0  # meters
         self.task_active = False
@@ -53,7 +53,7 @@ class WaypointManager:
         self.on_waypoint_reached = on_waypoint_reached
         self.on_task_completed = on_task_completed
     
-    def start_navigation_task(self, waypoint_path: List[str], task_description: str = "") -> str:
+    def start_navigation_task(self, waypoint_path: List[str], task_description: str = "", stop_flags: List[bool] = None) -> str:
         """
         开始导航任务
         
@@ -72,12 +72,15 @@ class WaypointManager:
             self.task_active = False
             return "未提供有效的航点路径。"
         
+        if stop_flags is None or len(stop_flags) != len(waypoint_path):
+            stop_flags = [True] * len(waypoint_path)
+
         # 验证并添加有效航点到队列
         valid_waypoints = []
-        for waypoint_name in waypoint_path:
+        for waypoint_name, stop_required in zip(waypoint_path, stop_flags):
             coords = self.graph.get_location_coordinates(waypoint_name)
             if coords:
-                valid_waypoints.append((waypoint_name, coords))
+                valid_waypoints.append((waypoint_name, coords, stop_required))
             else:
                 rospy.logwarn(f"航点 '{waypoint_name}' 不在已知位置列表中")
         
@@ -89,8 +92,9 @@ class WaypointManager:
         self.process_next_waypoint()
         
         waypoint_names = [wp[0] for wp in valid_waypoints]
+        stop_names = [wp[0] for wp in valid_waypoints if wp[2]]
         rospy.loginfo(f"开始执行任务: {task_description}")
-        return f"任务启动: {task_description}\n巡检路径: {' → '.join(waypoint_names)}"
+        return f"任务启动: {task_description}\n巡检路径: {' → '.join(waypoint_names)}\n停留点: {' → '.join(stop_names)}"
     
     def process_next_waypoint(self):
         """处理下一个航点"""
@@ -103,7 +107,7 @@ class WaypointManager:
                 self.on_task_completed()
             return
         
-        location_name, coords = self.waypoint_queue[0]
+        location_name, coords, stop_required = self.waypoint_queue[0]
         
         # 创建目标点消息
         pose_msg = PoseStamped()
@@ -121,8 +125,9 @@ class WaypointManager:
         self.goal_pub.publish(self.current_goal)
         
         # 确认发布成功
+        waypoint_type = "停留点" if stop_required else "过渡点"
         if self.goal_pub.get_num_connections() > 0:
-            rospy.loginfo(f"🎯 前往: {location_name} 坐标({coords[0]}, {coords[1]}) - 目标已发布给{self.goal_pub.get_num_connections()}个订阅者")
+            rospy.loginfo(f"🎯 前往{waypoint_type}: {location_name} 坐标({coords[0]}, {coords[1]}) - 目标已发布给{self.goal_pub.get_num_connections()}个订阅者")
         else:
             rospy.logwarn(f"⚠️ 警告: 目标发布但没有订阅者 - {location_name}")
             # 重试发布
@@ -150,11 +155,14 @@ class WaypointManager:
         )
         
         if distance < self.goal_tolerance:
-            reached_waypoint = self.waypoint_queue[0][0]
-            rospy.loginfo(f"✅ 已到达: {reached_waypoint}")
+            reached_waypoint, _, stop_required = self.waypoint_queue[0]
+            if stop_required:
+                rospy.loginfo(f"✅ 已到达停留点: {reached_waypoint}")
+            else:
+                rospy.loginfo(f"✅ 已通过过渡点: {reached_waypoint}")
             
-            # 触发航点到达回调
-            if self.on_waypoint_reached:
+            # 仅对需要停留的航点触发到达回调
+            if stop_required and self.on_waypoint_reached:
                 self.on_waypoint_reached(reached_waypoint)
             
             # 移除已到达的航点，处理下一个
@@ -199,6 +207,7 @@ class WaypointManager:
             "task_active": self.task_active,
             "remaining_waypoints": len(self.waypoint_queue),
             "waypoint_queue": [wp[0] for wp in self.waypoint_queue],
+            "stop_points": [wp[0] for wp in self.waypoint_queue if wp[2]],
             "current_target": self.waypoint_queue[0][0] if self.waypoint_queue else None
         }
     
@@ -216,7 +225,7 @@ class WaypointManager:
         """向队列添加航点"""
         coords = self.graph.get_location_coordinates(waypoint_name)
         if coords:
-            self.waypoint_queue.append((waypoint_name, coords))
+            self.waypoint_queue.append((waypoint_name, coords, True))
             if self.task_active and self.current_goal is None:
                 self.process_next_waypoint()
             return True

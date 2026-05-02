@@ -6,6 +6,8 @@
 #define PCL_NO_PRECOMPILE
 #include "patchwork/patchwork.hpp"
 #include <cstdlib>
+#include <nav_msgs/Odometry.h>
+#include <mutex>
 
 
 using PointType = pcl::PointXYZ;
@@ -29,6 +31,18 @@ string      mode;
 string      seq;
 bool        save_flag;
 
+// Robot position for centering pointcloud before patchwork
+std::mutex odom_mutex;
+double robot_x = 0.0, robot_y = 0.0;
+bool has_odom = false;
+
+void odomCallback(const nav_msgs::OdometryConstPtr &odom) {
+    std::lock_guard<std::mutex> lock(odom_mutex);
+    robot_x = odom->pose.pose.position.x;
+    robot_y = odom->pose.pose.position.y;
+    has_odom = true;
+}
+
 template<typename T>
 pcl::PointCloud<T> cloudmsg2cloud(sensor_msgs::PointCloud2 cloudmsg)
 {
@@ -47,8 +61,30 @@ sensor_msgs::PointCloud2 cloud2msg(pcl::PointCloud<T> cloud, std::string frame_i
 }
 
 void callbackNode(const sensor_msgs::PointCloud2ConstPtr &msg) {
-    pcl::fromROSMsg(*msg,pc_curr);
+    double ox, oy;
+    {
+        std::lock_guard<std::mutex> lock(odom_mutex);
+        if (!has_odom) return;
+        ox = robot_x;
+        oy = robot_y;
+    }
+
+    pcl::fromROSMsg(*msg, pc_curr);
+
+    // Center pointcloud on robot position so patchwork computes
+    // range from sensor, not from world origin
+    for (auto &pt : pc_curr.points) {
+        pt.x -= ox;
+        pt.y -= oy;
+    }
+
     PatchworkGroundSeg->estimate_ground(pc_curr, pc_ground, pc_non_ground, time_taken);
+
+    // Shift output back to map frame
+    for (auto &pt : pc_curr.points)    { pt.x += ox; pt.y += oy; }
+    for (auto &pt : pc_ground.points)  { pt.x += ox; pt.y += oy; }
+    for (auto &pt : pc_non_ground.points) { pt.x += ox; pt.y += oy; }
+
     CloudPublisher.publish(cloud2msg(pc_curr));
     PositivePublisher.publish(cloud2msg(pc_ground));
     NegativePublisher.publish(cloud2msg(pc_non_ground));
@@ -61,6 +97,7 @@ int main(int argc, char **argv) {
     nh.param<string>("/algorithm", algorithm, "patchwork");
 
     ros::Subscriber NodeSubscriber = nh.subscribe<sensor_msgs::PointCloud2>("/pointcloud_scan", 5000, callbackNode);
+    ros::Subscriber OdomSubscriber = nh.subscribe<nav_msgs::Odometry>("/state_estimation", 100, odomCallback);
 
     ros::Rate loop_rate(10);
 

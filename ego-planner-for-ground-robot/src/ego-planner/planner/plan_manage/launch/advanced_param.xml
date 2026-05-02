@@ -20,6 +20,7 @@
   <!-- maximum angular velocity, curvature and angular velocity -->
   <arg name="max_w"/>
   <arg name="max_k"/>
+  <arg name="max_k_inflation"/>
 
 
   <arg name="planning_horizon"/>
@@ -102,7 +103,7 @@
     <param name="grid_map/local_update_range_x"  value="8.0" />
     <param name="grid_map/local_update_range_y"  value="8.0" />
     <param name="grid_map/local_update_range_z"  value="1.5" />
-    <param name="grid_map/obstacles_inflation"     value="0.5" />
+    <param name="grid_map/obstacles_inflation"     value="0.3" />
     <param name="grid_map/local_map_margin" value="2"/>
     <param name="grid_map/ground_height"        value="-0.01"/>
     <!-- camera parameter -->
@@ -125,7 +126,7 @@
     <param name="grid_map/p_max"  value="0.90"/>
     <param name="grid_map/p_occ"  value="0.80"/>
     <param name="grid_map/min_ray_length" value="0.1"/>
-    <param name="grid_map/max_ray_length" value="4.0"/>
+    <param name="grid_map/max_ray_length" value="8.0"/>
 
     <param name="grid_map/virtual_ceil_height"   value="2.5"/>
     <param name="grid_map/visualization_truncate_height"   value="1.6"/>
@@ -139,8 +140,9 @@
     <param name="manager/use_minco" value="false" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
-    <param name="manager/max_jerk" value="4" type="double"/>
+    <param name="manager/max_w" value="$(arg max_w)" type="double"/>
     <param name="manager/control_points_distance" value="0.6" type="double"/>
+    <param name="manager/polyTraj_piece_length" value="1.5" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <!--是否开启拓扑同伦轨迹（会增加计算量）-->
@@ -149,37 +151,53 @@
   <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
     <param name="optimization/lambda_collision" value="0.8" type="double"/>
-    <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
+    <param name="optimization/lambda_feasibility" value="1.5" type="double"/>
     <param name="optimization/lambda_fitness" value="1.0" type="double"/>
     <param name="optimization/dist0" value="1.0" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
-    <param name="optimization/max_jerk" value="$(arg max_jer)" type="double"/>
     <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
     <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
+    <param name="optimization/max_k_inflation" value="$(arg max_k_inflation)" type="double"/>
     
     <param name="bspline/limit_vel" value="$(arg max_vel)" type="double"/>
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
     <param name="bspline/limit_ratio" value="1.1" type="double"/>
 
-    <!-- MINCO optimization parameters -->
-    <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
-    <param name="optimization/weight_obstacle" value="800.0" type="double"/>
-    <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
-    <param name="optimization/weight_feasibility" value="1200.0" type="double"/>
-    <param name="optimization/weight_curv" value="400.0" type="double"/>
-    <param name="optimization/weight_sqrvariance" value="800.0" type="double"/>
-    <param name="optimization/weight_time" value="500.0" type="double"/>
-    <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
+    <!-- MINCO optimization parameters (H2 阶段验证最优组合, 成功率最高) -->
+    <!-- 修复 C: 10 × 5 段 = 50 采样点代价过重且让 LBFGS 不易收敛; 7 间距 0.21m 仍<0.5m膨胀
+         满足采样不漏障碍的需求, 同时控制 LBFGS 单次代价 -->
+    <param name="optimization/constraint_points_perPiece" value="6" type="int"/>
+    <!-- 修复 (穿障): 1500 时仍有 SAFETY 期间 Replan 抢救, 上调到 2500 强约束 -->
+    <param name="optimization/weight_obstacle" value="1000.0" type="double"/>
+    <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
+    <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
+    <!-- 修复 D: weight_curv 500 让代价面过陡, 初值偏差就炸 → 中间值 250 -->
+    <param name="optimization/weight_curv" value="100.0" type="double"/>
+    <param name="optimization/weight_sqrvariance" value="1000.0" type="double"/>
+    <!-- atan 软饱和 (Fix H2) 已限制 RT≤431, 可以放心调到 450 -->
+    <param name="optimization/weight_time" value="300.0" type="double"/>
+    <!-- 修复 (穿障): clearance 过小时 cost 梯度太弱, 0.13 → 0.18 抬高安全余量 -->
+    <param name="optimization/obstacle_clearance" value="0.15" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.25" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
-    <param name="optimization/velocity_singularity_eps" value="1" type="double"/>
     
-    <param name="MPC/v_max" value="1.8" type="double"/>
-    <param name="MPC/w_max" value="1.2" type="double"/>
-    <!-- <param name="MPC/w_max" value="$(arg max_w)" type="double"/> -->
-    <param name="MPC/omega0" value="1.0" type="double"/>
-    <param name="MPC/omega1" value="0.1" type="double"/>
+    <!-- MPC 控制器参数 -->
+    <param name="MPC/v_max" value="$(arg max_vel)" type="double"/>
+    <param name="MPC/w_max" value="$(arg max_w)" type="double"/>
+    <!-- 解耦权重: Q = diag(w_pos, w_pos, w_ang), 终端放大 rho_N -->
+    <!-- w_ang=5.0 偏高: 小角度误差被放大成大 ω → 实车滑出曲线 → 下一帧起点 v/a 错配 -->
+    <param name="MPC/w_pos" value="1.0" type="double"/>
+    <param name="MPC/w_ang" value="3.0" type="double"/>
+    <param name="MPC/rho_N" value="5.0" type="double"/>
+    <!-- 输入权重: R = diag(r_v, r_w) -->
+    <param name="MPC/r_v" value="0.1" type="double"/>
+    <param name="MPC/r_w" value="0.1" type="double"/>
+    <!-- 前馈参考输入开关 (消融实验用) -->
+    <param name="MPC/use_feedforward" value="true" type="bool"/>
+    <!-- 延时补偿 -->
+    <param name="MPC/use_delay_compensation" value="true" type="bool"/>
+    <param name="MPC/delay_ms" value="50.0" type="double"/>
 
   </node>
 

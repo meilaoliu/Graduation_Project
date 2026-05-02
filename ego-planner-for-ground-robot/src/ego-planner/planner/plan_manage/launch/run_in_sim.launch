@@ -7,7 +7,9 @@
   <!-- topic of your odometry such as VIO or LIO -->
   <arg name="odom_topic" value="/state_estimation" />
   <arg name="pointcloud_topic" value="/registered_scan" />
-
+  
+  <arg name="use_rqt_robot_steering" value="true" />
+  
   <!-- main algorithm params -->
   <include file="$(find ego_planner)/launch/advanced_param.xml">
 
@@ -35,15 +37,20 @@
     <arg name="fy" value="387.229248046875"/>
 
     <!-- maximum velocity and acceleration the drone will reach -->
-    <arg name="max_vel" value="1.5" />
-    <arg name="max_acc" value="3" />
-    <arg name="max_jer" value="8.0" />
+    <arg name="max_vel" value="1.3" />
+    <arg name="max_acc" value="2" />
+    <arg name="max_jer" value="5.0" />
     <!-- maximum angular velocity, curvature and angular velocity -->
-    <arg name="max_w" value="12.0" />
-    <arg name="max_k" value="12.0" />
+    <!-- 差速运动学约束: ω = v·κ, 取 max_k ≤ max_w/max_vel = 2.0/1.3 ≈ 1.54 避免约束自相矛盾 -->
+    <arg name="max_w" value="2.0" />
+    <arg name="max_k" value="2.0" />
+    <!--fotr B-spline-->
+    <arg name="max_k_inflation" value="8.0" /> 
 
     <!--always set to 1.5 times grater than sensing horizen-->
-    <arg name="planning_horizon" value="10.5" />
+    <!-- 7.5 在密集障碍区让 local target 太远, BVP 时间分配过长触发 COST_NAN; 6.0 更稳 -->
+    <!-- 修复 E: 6.0 时尾段 ~2m 不可见 → 缩到 4.5 让 finelyCheck 全段校验更稳 -->
+    <arg name="planning_horizon" value="5.0" />
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->
@@ -85,6 +92,11 @@
     
   </include>
 
+
+  <node if="$(arg use_rqt_robot_steering)" pkg="rqt_robot_steering" type="rqt_robot_steering" name="rqt_robot_steering" output="screen">
+    <param name="default_topic" value="/cmd_vel" />
+  </node>
+  
   <!-- trajectory server -->
 
   <node pkg="ego_planner" name="traj_server" type="traj_server" output="screen">

@@ -1,0 +1,28 @@
+<launch>
+  <!-- move_base with DWA local planner + map_server -->
+
+  <arg name="map_file" default="$(find vehicle_simulator)/world/dense_obstacles_map.yaml"/>
+
+  <!-- Map server: serves the pre-generated static map -->
+  <node pkg="map_server" type="map_server" name="map_server" args="$(arg map_file)" output="screen"/>
+
+  <!-- move_base node -->
+  <node pkg="move_base" type="move_base" name="move_base" output="screen">
+    <remap from="odom" to="/state_estimation"/>
+
+    <!-- Common parameters -->
+    <rosparam file="$(find navigation_baseline)/config/move_base_params.yaml" command="load"/>
+
+    <!-- Planner selection -->
+    <param name="base_global_planner" value="global_planner/GlobalPlanner"/>
+    <param name="base_local_planner" value="dwa_local_planner/DWAPlannerROS"/>
+
+    <!-- Costmap configurations -->
+    <rosparam file="$(find navigation_baseline)/config/global_costmap_params.yaml" command="load"/>
+    <rosparam file="$(find navigation_baseline)/config/local_costmap_params.yaml" command="load"/>
+
+    <!-- DWA local planner parameters -->
+    <rosparam file="$(find navigation_baseline)/config/dwa_local_planner_params.yaml" command="load"/>
+  </node>
+
+</launch>

@@ -1,0 +1,11 @@
+<launch>
+  <arg name="image_topic" default="/camera/image"/>
+  <arg name="save_dir" default="~/inspection_photos"/>
+
+  <node pkg="inspection_services" type="photo_service_node.py" name="photo_service" output="screen">
+    <param name="image_topic" value="$(arg image_topic)"/>
+    <param name="save_dir" value="$(arg save_dir)"/>
+    <param name="thumbnail_max_width" value="240"/>
+    <param name="jpeg_quality" value="90"/>
+  </node>
+</launch>

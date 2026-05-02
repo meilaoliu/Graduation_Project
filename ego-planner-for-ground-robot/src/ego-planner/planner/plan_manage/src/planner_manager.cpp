@@ -1,6 +1,9 @@
-// #include <fstream>
 #include <plan_manage/planner_manager.h>
 #include <thread>
+#include <fstream>
+#include <iomanip>
+#include <sys/stat.h>
+#include <ros/package.h>
 
 namespace ego_planner
 {
@@ -11,6 +14,98 @@ namespace ego_planner
 
     EGOPlannerManager::~EGOPlannerManager() { std::cout << "des manager" << std::endl; }
 
+    void EGOPlannerManager::computeCurrentTrajMetrics(double &traj_length, double &max_speed, double &max_curvature)
+    {
+        traj_length = 0.0;
+        max_speed = 0.0;
+        max_curvature = 0.0;
+
+        const double duration = local_data_.duration_;
+        const double dt_sample = 0.02;
+        if (duration <= 1e-6)
+        {
+            return;
+        }
+
+        Eigen::Vector3d last_pt;
+        if (local_data_.use_minco_traj_)
+            last_pt = local_data_.minco_traj_.getPos(0.0);
+        else
+            last_pt = local_data_.position_traj_.evaluateDeBoorT(0.0);
+
+        for (double t = dt_sample; t <= duration + 1e-6; t += dt_sample)
+        {
+            const double t_eval = std::min(t, duration);
+            Eigen::Vector3d pt;
+            if (local_data_.use_minco_traj_)
+                pt = local_data_.minco_traj_.getPos(t_eval);
+            else
+                pt = local_data_.position_traj_.evaluateDeBoorT(t_eval);
+            traj_length += (pt - last_pt).norm();
+            last_pt = pt;
+
+            Eigen::Vector3d vel;
+            Eigen::Vector3d acc;
+            if (local_data_.use_minco_traj_)
+            {
+                vel = local_data_.minco_traj_.getVel(t_eval);
+                acc = local_data_.minco_traj_.getAcc(t_eval);
+            }
+            else
+            {
+                vel = local_data_.velocity_traj_.evaluateDeBoorT(t_eval);
+                acc = local_data_.acceleration_traj_.evaluateDeBoorT(t_eval);
+            }
+            double vx = vel(0), vy = vel(1), ax = acc(0), ay = acc(1);
+            double spd = std::sqrt(vx * vx + vy * vy);
+            if (spd > max_speed)
+                max_speed = spd;
+            if (spd > 0.1)
+            {
+                double kappa = std::abs(vx * ay - vy * ax) / (spd * spd * spd);
+                if (kappa > max_curvature)
+                    max_curvature = kappa;
+            }
+        }
+    }
+
+    void EGOPlannerManager::appendPlanningStats(double total_plan_time_sec, int iterations, const std::string &planner_type)
+    {
+        double traj_length, max_speed, max_curvature;
+        computeCurrentTrajMetrics(traj_length, max_speed, max_curvature);
+
+        std::string log_dir = ros::package::getPath("ego_planner") + "/../../../../src/benchmark";
+        char resolved[PATH_MAX];
+        if (realpath(log_dir.c_str(), resolved))
+            log_dir = std::string(resolved);
+        mkdir(log_dir.c_str(), 0755);
+
+        std::string csv_path = log_dir + "/planning_stats.csv";
+        bool file_exists = std::ifstream(csv_path).good();
+        std::ofstream fout(csv_path, std::ios::app);
+        if (!fout.is_open())
+        {
+            return;
+        }
+
+        if (!file_exists)
+        {
+            fout << "planner_type,traj_id,plan_time_ms,traj_length_m,duration_s,max_speed,max_curvature,iterations,success" << std::endl;
+        }
+
+        fout << std::fixed << std::setprecision(4)
+             << planner_type << ","
+             << local_data_.traj_id_ << ","
+             << total_plan_time_sec * 1000.0 << ","
+             << traj_length << ","
+             << local_data_.duration_ << ","
+             << max_speed << ","
+             << max_curvature << ","
+             << iterations << ","
+             << 1 << std::endl;
+        fout.close();
+    }
+
     void EGOPlannerManager::initPlanModules(ros::NodeHandle &nh, PlanningVisualization::Ptr vis)
     {
         /* read algorithm parameters */
@@ -18,8 +113,10 @@ namespace ego_planner
         nh.param("manager/max_vel", pp_.max_vel_, -1.0);
         nh.param("manager/max_acc", pp_.max_acc_, -1.0);
         nh.param("manager/max_jerk", pp_.max_jerk_, -1.0);
+        nh.param("manager/max_w", pp_.max_w_, -1.0);
         nh.param("manager/feasibility_tolerance", pp_.feasibility_tolerance_, 0.0);
         nh.param("manager/control_points_distance", pp_.ctrl_pt_dist, -1.0);
+        nh.param("manager/polyTraj_piece_length", pp_.polyTraj_piece_length, 1.5);
         nh.param("manager/planning_horizon", pp_.planning_horizen_, 5.0);
         nh.param("manager/use_minco", use_minco_, false);
         nh.param("manager/use_multitopology_trajs", pp_.use_multitopology_trajs_, false);
@@ -48,18 +145,27 @@ namespace ego_planner
         visualization_ = vis;
     }
 
+    // Fix G: passthrough, FSM 用来侦测连续 init_collision_dense
+    std::string EGOPlannerManager::getMincoLastFailureReason() const
+    {
+        if (minco_optimizer_)
+            return minco_optimizer_->getLastFailureReason();
+        return "";
+    }
+
     // !SECTION
 
     // SECTION rebond replanning
 
     bool EGOPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
                                           Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
-                                          Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+                                          Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                                          bool touch_goal)
     {
         // 如果使用 MINCO，调用 MINCO 重规划
         if (use_minco_)
         {
-            return reboundReplanMinco(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, flag_polyInit, flag_randomPolyTraj);
+            return reboundReplanMinco(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, flag_polyInit, flag_randomPolyTraj, touch_goal);
         }
 
         static int count = 0;
@@ -282,7 +388,10 @@ namespace ego_planner
         // save planned results
         updateTrajInfo(pos, ros::Time::now());
 
-        cout << "total time:\033[42m" << (t_init + t_opt + t_refine).toSec() << "\033[0m,optimize:" << (t_init + t_opt).toSec() << ",refine:" << t_refine.toSec() << endl;
+        double total_plan_time = (t_init + t_opt + t_refine).toSec();
+        cout << "total time:\033[42m" << total_plan_time << "\033[0m,optimize:" << (t_init + t_opt).toSec() << ",refine:" << t_refine.toSec() << endl;
+
+                appendPlanningStats(total_plan_time, bspline_optimizer_rebound_->getIterNum(), "bspline");
 
         // success. YoY
         continous_failures_count_ = 0;
@@ -522,7 +631,8 @@ namespace ego_planner
     }
 
     bool EGOPlannerManager::reboundReplanMinco(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                                               Eigen::Vector3d local_target_pt, Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+                                               Eigen::Vector3d local_target_pt, Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                                               bool touch_goal)
     {
         ros::Time t_start = ros::Time::now();
         ros::Duration t_init, t_opt;
@@ -530,15 +640,38 @@ namespace ego_planner
         static int count = 0;
         cout << "\033[47;30m\n[" << t_start << "] Replan Minco " << count++ << "\033[0m" << endl;
 
+        // === [起点 v/a 安全 clamp] 切断 "上一帧失败 → odom v/a 异常 → BVP cost=1e+213 → -1007" 的反馈链 ===
+        // 任意 NaN/Inf 直接置零; 模长超过 max_vel/max_acc 的等比缩放
+        auto sanitize = [](Eigen::Vector3d &v, double lim, const char *tag) {
+          if (!v.allFinite()) {
+            ROS_WARN("[CLAMP] %s has NaN/Inf, reset to zero", tag);
+            v.setZero();
+            return;
+          }
+          double n = v.norm();
+          if (n > lim && lim > 1e-6) {
+            ROS_WARN("[CLAMP] %s norm=%.3f > %.3f, scale down", tag, n, lim);
+            v *= (lim / n);
+          }
+        };
+        sanitize(start_vel, pp_.max_vel_, "start_vel");
+        sanitize(start_acc, pp_.max_acc_, "start_acc");
+        const double fixed_z = start_pt(2);
+        local_target_pt(2) = fixed_z;
+        local_target_vel(2) = 0.0;
+        start_vel(2) = 0.0;
+        start_acc(2) = 0.0;
+
         /*** STEP 1: INIT ***/
-        minco_optimizer_->setIfTouchGoal(global_data_.localTrajReachTarget()); // Approximate check
-        double ts = pp_.ctrl_pt_dist / pp_.max_vel_;
+        // P2-C: 优先使用上层推算的 touch_goal; 其仅在初始未设置时才起作用。
+        const bool effective_touch_goal = touch_goal || global_data_.localTrajReachTarget();
+        minco_optimizer_->setIfTouchGoal(effective_touch_goal);
+        double ts = pp_.polyTraj_piece_length / pp_.max_vel_;
 
         poly_traj::MinJerkOpt initMJO;
         if (!computeInitState(start_pt, start_vel, start_acc, local_target_pt, local_target_vel,
                               flag_polyInit, flag_randomPolyTraj, ts, initMJO))
         {
-            continous_failures_count_++;
             return false;
         }
 
@@ -546,7 +679,11 @@ namespace ego_planner
         vector<std::pair<int, int>> segments;
         if (minco_optimizer_->finelyCheckAndSetConstraintPoints(segments, initMJO, true) == PolyTrajOptimizer::CHK_RET::ERR)
         {
-            continous_failures_count_++;
+            ROS_WARN_STREAM("[MINCO] Initial fine check failed: reason="
+                            << minco_optimizer_->getLastFailureReason()
+                            << ", start=" << start_pt.transpose()
+                            << ", local_target=" << local_target_pt.transpose()
+                            << ", ctrl_pts=" << cstr_pts.cols());
             return false;
         }
 
@@ -650,8 +787,17 @@ namespace ego_planner
             printf("Time:\033[42m%.3fms,\033[0m init:%.3fms, optimize:%.3fms, avg=%.3fms\n",
                    (t_init + t_opt).toSec() * 1000, t_init.toSec() * 1000, t_opt.toSec() * 1000, sum_time / count_success * 1000);
 
-            setLocalTrajFromOpt(best_MJO, global_data_.localTrajReachTarget());
+            bool local_traj_ok = setLocalTrajFromOpt(best_MJO, effective_touch_goal);
             cstr_pts = best_MJO.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
+            if (local_traj_ok)
+            {
+                appendPlanningStats((t_init + t_opt).toSec(), minco_optimizer_->getIterNum(), "minco");
+            }
+            else
+            {
+                flag_success = false;
+                ROS_WARN("[MINCO] Optimizer returned a trajectory, but PlannerManager rejected it before publishing");
+            }
             
             // 单拓扑模式下显示最优轨迹（多拓扑模式已经在上面显示过了）
             if (!pp_.use_multitopology_trajs_)
@@ -663,12 +809,25 @@ namespace ego_planner
                 visualization_->displayOptimalList(cstr_pts, 0);
             }
 
-            continous_failures_count_ = 0;
+            if (flag_success)
+                continous_failures_count_ = 0;
+            else
+                continous_failures_count_++;
         }
         else
         {
             cstr_pts = minco_optimizer_->getMinJerkOpt().getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
             visualization_->displayInitPathList(point_set, 0.2, 0);
+            ROS_WARN_STREAM("[MINCO] Optimize failed: reason="
+                            << minco_optimizer_->getLastFailureReason()
+                            << ", lbfgs=" << minco_optimizer_->getLastLbfgsResult()
+                            << ", restarts=" << minco_optimizer_->getLastRestartCount()
+                            << ", rebounds=" << minco_optimizer_->getLastReboundCount()
+                            << ", final_cost=" << minco_optimizer_->getLastFinalCost()
+                            << ", start=" << start_pt.transpose()
+                            << ", local_target=" << local_target_pt.transpose()
+                            << ", init_ms=" << t_init.toSec() * 1000.0
+                            << ", opt_ms=" << t_opt.toSec() * 1000.0);
 
             continous_failures_count_++;
         }
@@ -694,7 +853,13 @@ namespace ego_planner
             Eigen::MatrixXd innerPs;
             Eigen::VectorXd piece_dur_vec;
             int piece_nums;
-            constexpr double init_of_init_totaldur = 2.0;
+            // === 修复 A: BVP 初值 totaldur 距离自适应 ===
+            // 原本固定 2.0s, 距离 5m 时初值会让中段 v ~2.5m/s, a ~9m/s² (远超限制 1.3/2.0),
+            // LBFGS 在 max_restarts=3 内根本拉不回可行域 → 永远 max_restarts → FSM 死循环。
+            // 用 dist / (0.7 * max_vel) 估计走完所需时间, 下限 2.0s 防止极近距离时分母太小。
+            const double _init_dist = (start_pt - local_target_pt).head<2>().norm();
+            const double _vref = std::max(0.5, pp_.max_vel_);
+            const double init_of_init_totaldur = std::max(2.0, _init_dist / (0.7 * _vref));
             
             // 优化起点速度方向：仅在速度很小时调整
             // 速度不为零时保持原始速度，让FSM的ADJUST_POSE处理掉头
@@ -754,7 +919,7 @@ namespace ego_planner
             poly_traj::Trajectory initTraj = initMJO.getTraj();
 
             /* generate the real init trajectory */
-            piece_nums = round((headState.col(0) - tailState.col(0)).norm() / pp_.ctrl_pt_dist);
+            piece_nums = round((headState.col(0) - tailState.col(0)).norm() / pp_.polyTraj_piece_length);
             if (piece_nums < 2)
                 piece_nums = 2;
             double piece_dur = init_of_init_totaldur / (double)piece_nums;
@@ -796,7 +961,7 @@ namespace ego_planner
             }
             double t_to_lc_tgt = t_to_lc_end +
                                  (global_data_.glb_t_of_lc_tgt_ - global_data_.last_glb_t_of_lc_tgt_);
-            int piece_nums = ceil((start_pt - local_target_pt).norm() / pp_.ctrl_pt_dist);
+            int piece_nums = ceil((start_pt - local_target_pt).norm() / pp_.polyTraj_piece_length);
             if (piece_nums < 2)
                 piece_nums = 2;
 
@@ -839,6 +1004,68 @@ namespace ego_planner
     bool EGOPlannerManager::setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal)
     {
         poly_traj::Trajectory traj = opt.getTraj();
+
+        auto timeScaleTraj = [](const poly_traj::Trajectory &input, double scale) {
+            std::vector<double> durations;
+            std::vector<poly_traj::CoefficientMat> coeffs;
+            durations.reserve(input.getPieceNum());
+            coeffs.reserve(input.getPieceNum());
+            for (int i = 0; i < input.getPieceNum(); ++i)
+            {
+                poly_traj::CoefficientMat coeff = input[i].getCoeffMat();
+                for (int col = 0; col < 5; ++col)
+                {
+                    const int degree = 5 - col;
+                    coeff.col(col) /= std::pow(scale, degree);
+                }
+                durations.push_back(input[i].getDuration() * scale);
+                coeffs.push_back(coeff);
+            }
+            return poly_traj::Trajectory(durations, coeffs);
+        };
+
+        double max_v = 0.0, max_a = 0.0, max_w = 0.0, max_z_err = 0.0;
+        const double fixed_z = traj.getPos(0.0)(2);
+        const double dt = 0.05;
+        for (double t = 0.0; t <= traj.getTotalDuration(); t += dt)
+        {
+            Eigen::Vector3d pos = traj.getPos(t);
+            Eigen::Vector3d vel = traj.getVel(t);
+            Eigen::Vector3d acc = traj.getAcc(t);
+            max_z_err = std::max(max_z_err, std::abs(pos(2) - fixed_z));
+            const double speed = vel.head<2>().norm();
+            max_v = std::max(max_v, speed);
+            max_a = std::max(max_a, acc.head<2>().norm());
+            if (speed > 0.05)
+            {
+                const double cross = vel(0) * acc(1) - vel(1) * acc(0);
+                max_w = std::max(max_w, std::abs(cross) / (speed * speed));
+            }
+        }
+        if (max_z_err > 0.03)
+        {
+            ROS_WARN("[MINCO_REJECT] z drift %.3fm exceeds 2D plane tolerance", max_z_err);
+            return false;
+        }
+
+        const double vel_scale = max_v / std::max(0.1, pp_.max_vel_ * 0.98);
+        const double acc_scale = std::sqrt(max_a / std::max(0.1, pp_.max_acc_ * 0.98));
+        const double w_scale = max_w / std::max(0.1, pp_.max_w_ * 0.98);
+        const double scale = std::max(1.0, std::max(vel_scale, std::max(acc_scale, w_scale)));
+        if (!std::isfinite(scale) || scale > 4.0)
+        {
+            ROS_WARN("[MINCO_REJECT] infeasible after scaling: scale=%.2f, max_v=%.2f, max_a=%.2f, max_w=%.2f",
+                     scale, max_v, max_a, max_w);
+            return false;
+        }
+        if (scale > 1.02)
+        {
+            const double old_duration = traj.getTotalDuration();
+            traj = timeScaleTraj(traj, scale);
+            ROS_WARN("[MINCO_SCALE] time-scale %.2f: max_v %.2f->%.2f, max_a %.2f->%.2f, max_w %.2f->%.2f, dur %.2f->%.2f",
+                     scale, max_v, max_v / scale, max_a, max_a / (scale * scale), max_w, max_w / scale,
+                     old_duration, traj.getTotalDuration());
+        }
         
         // 计算预检测点缓存，用于高效安全碰撞检测
         Eigen::MatrixXd cps = opt.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());

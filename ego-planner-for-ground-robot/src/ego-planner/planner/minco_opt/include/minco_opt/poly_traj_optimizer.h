@@ -2,6 +2,7 @@
 #define _POLY_TRAJ_OPTIMIZER_H_
 
 #include <Eigen/Eigen>
+#include <string>
 #include <path_searching/dyn_a_star.h>
 #include <plan_env/grid_map.h>
 #include <ros/ros.h>
@@ -70,6 +71,15 @@ namespace ego_planner
     AStar::Ptr a_star_;
     poly_traj::MinJerkOpt jerkOpt_;
     ConstraintPoints cps_;
+
+    // 地面机器人: 使用 2D inflation buffer 做碰撞判定, 与 dyn_a_star / SAFETY guard 一致
+    // (3D buffer 在 z=0.7 高度上往往查不到, 因为障碍点云不一定覆盖该高度)
+    inline int isOccupied2d(const Eigen::Vector3d &p)
+    {
+      // 出界 (-1) 视为 free (0), 避免出界点被 cast bool=true 伪造障碍.
+      int r = grid_map_->getInflateOccupancy2d(Eigen::Vector2d(p(0), p(1)));
+      return r > 0 ? 1 : 0;
+    }
     // PtsChk_t pts_check_;
 
     int drone_id_;
@@ -77,6 +87,7 @@ namespace ego_planner
     int variable_num_;       // optimization variables
     int piece_num_;          // poly traj piece numbers
     int iter_num_;           // iteration of the solver
+    double fixed_z_{0.0};     // locked planning plane height for ground robots
     std::vector<double> min_ellip_dist2_; // min trajectory distance in swarm
     bool touch_goal_;
     struct MultitopologyData_t
@@ -103,6 +114,12 @@ namespace ego_planner
     double eps_;                                                  // velocity singularity epsilon to avoid division by zero
 
     double t_now_;
+    std::string last_failure_reason_;
+    int last_lbfgs_result_{0};
+    int last_force_stop_type_{0};
+    int last_restart_count_{0};
+    int last_rebound_count_{0};
+    double last_final_cost_{0.0};
 
   public:
     PolyTrajOptimizer() {}
@@ -128,6 +145,12 @@ namespace ego_planner
     inline const ConstraintPoints &getControlPoints(void) { return cps_; }
     inline const poly_traj::MinJerkOpt &getMinJerkOpt(void) { return jerkOpt_; }
     inline int get_cps_num_prePiece_(void) { return cps_num_prePiece_; }
+    inline int getIterNum(void) const { return iter_num_; }
+    inline const std::string &getLastFailureReason(void) const { return last_failure_reason_; }
+    inline int getLastLbfgsResult(void) const { return last_lbfgs_result_; }
+    inline int getLastRestartCount(void) const { return last_restart_count_; }
+    inline int getLastReboundCount(void) const { return last_rebound_count_; }
+    inline double getLastFinalCost(void) const { return last_final_cost_; }
 
     /* main planning API */
     bool optimizeTrajectory(const Eigen::MatrixXd &iniState, const Eigen::MatrixXd &finState,
@@ -201,8 +224,7 @@ namespace ego_planner
                               Eigen::Vector3d &gradK_a,
                               double &costK);
 
-    // Smoothed L1 penalty function for better optimization convergence
-    void positiveSmoothedL1(const double &x, double &f, double &df);
+
 
     void distanceSqrVarianceWithGradCost2p(const Eigen::MatrixXd &ps,
                                            Eigen::MatrixXd &gdp,

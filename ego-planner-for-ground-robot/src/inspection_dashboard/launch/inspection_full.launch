@@ -1,0 +1,52 @@
+<launch>
+  <!--
+       inspection_full.launch
+       一键启动变电站智能巡检完整流水线：
+         Gazebo 仿真 + ego_planner + 拍照服务 + 电量模拟 + 调度器 + Web UI
+
+       说明：
+         * use_minco=true  → 使用 MINCO 优化器
+           use_minco=false → 使用 B 样条优化器（默认值由 advanced_substation_param.xml 决定）
+           二者均通过同一份 /global_waypoints → planGlobalTrajWaypoints 接口工作。
+         * realistic=true  → 加载高保真 system_substation_realistic 场景（约 370MB DAE，启动慢）
+           realistic=false → 加载轻量 system_substation 场景（默认）
+   -->
+
+  <arg name="realistic"            default="false"/>
+  <arg name="use_global_traj"      default="true"/>
+  <arg name="initial_battery"      default="100.0"/>
+  <arg name="low_battery_threshold" default="20.0"/>
+  <arg name="dashboard_port"       default="5000"/>
+  <arg name="dwell_seconds"        default="3.0"/>
+
+  <!-- 1) Gazebo / 自动驾驶基础设施 -->
+  <include unless="$(arg realistic)"
+           file="$(find vehicle_simulator)/launch/system_substation.launch"/>
+  <include if="$(arg realistic)"
+           file="$(find vehicle_simulator)/launch/system_substation_realistic.launch"/>
+
+  <!-- 2) ego_planner（动态 waypoint 模式） -->
+  <include file="$(find ego_planner)/launch/run_in_substation.launch">
+    <arg name="flight_type" value="3"/>
+  </include>
+
+  <!-- 3) 拍照服务 -->
+  <include file="$(find inspection_services)/launch/photo_service.launch"/>
+
+  <!-- 4) 电量模拟 -->
+  <include file="$(find battery_simulator)/launch/battery_monitor.launch">
+    <arg name="initial_percentage"  value="$(arg initial_battery)"/>
+    <arg name="low_threshold"       value="$(arg low_battery_threshold)"/>
+  </include>
+
+  <!-- 5) Web 仪表盘 -->
+  <include file="$(find inspection_dashboard)/launch/dashboard.launch">
+    <arg name="port" value="$(arg dashboard_port)"/>
+  </include>
+
+  <!-- 6) 自然语言指令调度器（含分段全局轨迹 + 低电返航） -->
+  <include file="$(find nlp_commander)/launch/nlp_commander.launch">
+    <arg name="use_global_traj"        value="$(arg use_global_traj)"/>
+    <arg name="dwell_seconds"          value="$(arg dwell_seconds)"/>
+  </include>
+</launch>

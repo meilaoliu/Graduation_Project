@@ -1,0 +1,20 @@
+<launch>
+  <!-- 自然语言指令调度节点 (V2)
+       use_global_traj=true → 使用 SegmentScheduler 走分段全局轨迹 + 拍照
+       use_global_traj=false → 使用旧版 WaypointManager 单点导航 -->
+
+  <arg name="use_global_traj" default="true"/>
+  <arg name="dwell_seconds"   default="3.0"/>
+  <arg name="arrive_tol"      default="0.5"/>
+  <arg name="waypoint_z"      default="0.75"/>
+  <arg name="charge_full_threshold" default="95.0"/>
+
+  <node pkg="nlp_commander" type="substation_nlp_commander_node_v2.py"
+        name="substation_nlp_commander_v2" output="screen">
+    <param name="use_global_traj"        value="$(arg use_global_traj)"/>
+    <param name="dwell_seconds"          value="$(arg dwell_seconds)"/>
+    <param name="arrive_tolerance"       value="$(arg arrive_tol)"/>
+    <param name="waypoint_z"             value="$(arg waypoint_z)"/>
+    <param name="charge_full_threshold"  value="$(arg charge_full_threshold)"/>
+  </node>
+</launch>

@@ -8,6 +8,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
 #include <std_msgs/UInt8.h>
+#include <std_msgs/UInt32.h>
 #include <ros/ros.h>
 #include <std_msgs/Empty.h>
 #include <vector>
@@ -49,7 +50,7 @@ namespace ego_planner
     {
       MANUAL_TARGET = 1,
       PRESET_TARGET = 2,
-      REFENCE_PATH = 3
+      DYNAMIC_WAYPOINTS = 3   // 接收外部分段 waypoint 序列，每段调用一次 planGlobalTrajWaypoints
     };
 
     /* planning utils */
@@ -88,16 +89,28 @@ namespace ego_planner
     Eigen::Vector3d init_pt_, start_pt_, start_vel_, start_acc_, start_yaw_; // start state
     Eigen::Vector3d end_pt_, end_vel_;                                       // goal state
     Eigen::Vector3d local_target_pt_, local_target_vel_;                     // local target state
+    bool touch_goal_{false};                                                  // P2-C: getLocalTarget 设置, 取代 localTrajReachTarget() 的近似判定
     Eigen::Vector3d goal_last;
     int current_wp_;
+
+    // Fix G: stuck 检测 — 连续 init_collision_dense 触发 emergency stop + 全局重规
+    int consecutive_init_collision_count_{0};
+    // 通用: 不论 reason 的连续失败计数 (治 max_restarts 一直刷的死循环)
+    int consecutive_gen_failure_count_{0};
+    // 修复 B: GEN_NEW_TRAJ 失败后强制 100ms 冷却, 防 33ms 内同 start/target 堆 30 次 max_restarts
+    ros::Time last_gen_failure_stamp_{ros::Time(0)};
 
     bool flag_escape_emergency_;
 
     /* ROS utils */
     ros::NodeHandle node_;
     ros::Timer exec_timer_, safety_timer_;
-    ros::Subscriber waypoint_sub_, odom_sub_;
+    ros::Subscriber waypoint_sub_, odom_sub_, segment_waypoints_sub_;
     ros::Publisher replan_pub_, new_pub_, bspline_pub_, minco_pub_, data_disp_pub_,cmd_pub_,adjust_cmd_pub_,odom_adjust_pub_,dir_pub,stop_pub;
+    ros::Publisher segment_done_pub_;
+    // 分段巡检：当前正在执行的段编号；轨迹自然结束时会在 /segment_done 上发布，供上层 nlp_commander 调度下一段
+    uint32_t current_segment_id_{0};
+    bool has_active_segment_{false};
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
@@ -119,6 +132,9 @@ namespace ego_planner
     void execFSMCallback(const ros::TimerEvent &e);
     void checkCollisionCallback(const ros::TimerEvent &e);
     void waypointCallback(const nav_msgs::PathConstPtr &msg);
+    // 分段巡检入口：接收一段（多个停留/过渡 waypoint），首尾速度/加速度均为 0，
+    // 内部统一走 planGlobalTrajWaypoints，因此对 B 样条与 MINCO 两种局部规划器都通用。
+    void segmentWaypointsCallback(const nav_msgs::PathConstPtr &msg);
     void odometryCallback(const nav_msgs::OdometryConstPtr &msg);
     void goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg);
 

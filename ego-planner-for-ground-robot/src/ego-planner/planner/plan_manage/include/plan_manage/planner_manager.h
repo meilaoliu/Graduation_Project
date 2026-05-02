@@ -28,10 +28,13 @@ namespace ego_planner
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
         /* main planning interface */
+        // P2-C: 新增 touch_goal 显式参数 (默认 false 保持序列反向兼容)
         bool reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                           Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
+                           Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                           bool touch_goal = false);
         bool reboundReplanMinco(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel, Eigen::Vector3d start_acc,
-                           Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj);
+                           Eigen::Vector3d end_pt, Eigen::Vector3d end_vel, bool flag_polyInit, bool flag_randomPolyTraj,
+                           bool touch_goal = false);
         bool EmergencyStop(Eigen::Vector3d stop_pos);
         bool planGlobalTraj(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                             const Eigen::Vector3d &end_pos, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
@@ -39,6 +42,9 @@ namespace ego_planner
                                      const std::vector<Eigen::Vector3d> &waypoints, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc);
 
         void initPlanModules(ros::NodeHandle &nh, PlanningVisualization::Ptr vis = NULL);
+
+        // Fix G: 暴露最近一次 MINCO 优化失败原因, 给 FSM 做 stuck 检测
+        std::string getMincoLastFailureReason() const;
 
         PlanParameters pp_;
         LocalTrajData local_data_;
@@ -70,6 +76,8 @@ namespace ego_planner
             poly_traj::MinJerkOpt &initMJO);
 
         bool setLocalTrajFromOpt(const poly_traj::MinJerkOpt &opt, const bool touch_goal);
+        void computeCurrentTrajMetrics(double &traj_length, double &max_speed, double &max_curvature);
+        void appendPlanningStats(double total_plan_time_sec, int iterations, const std::string &planner_type);
 
         // !SECTION stable
 

@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 变电站图论工具模块
-提供Dijkstra算法和变电站拓扑图管理
+
+提供 Dijkstra 算法和变电站拓扑图管理。
+支持从 OSM 地图文件加载设备坐标，
+若 OSM 文件缺失则回退到内置坐标配置。
 """
 
 import math
+import os
 import heapq
 from typing import Dict, List, Tuple, Optional
+
+from .osm_map_loader import load_graph_from_osm
 
 class Vertex:
     """顶点类"""
@@ -25,34 +31,49 @@ class Vertex:
 class SubstationGraph:
     """变电站拓扑图类"""
     
-    def __init__(self):
-        # 变电站设备坐标 (根据中文说明.md)
-        self.locations = {
-            "入口点": (9, 27),
-            "插值点1": (3, 28),
-            "低压配电室1": (-8, 29),
-            "低压配电室2": (-26, 29),
-            "低压配电室3": (-43, 29),
-            "高压配电区巡检点1": (-31, 13),
-            "高压配电区巡检点2": (-32, -1),
-            "高压配电区巡检点3": (-32, -17),
-            "变压器区1": (-28, 14),
-            "变压器区2": (-29, 0.91),
-            "变压器区3": (-28, -11),
-            "插值点2": (-30, -17),
-            "3SVG无功补偿区": (-43, -27),
-            "2SVG无功补偿区": (-23, -27),
-            "1SVG无功补偿区": (-8, -27),
-            "插值点3": (-1, -25),
-            "35kv配电箱1": (-2, -14),
-            "35kv配电箱2": (-2, 1),
-            "35kv配电箱3": (-2, 17),
-            "插值点4": (6, -25),
-            "插值点5": (6 , -14),
-            "插值点6": (8 , -14),
-            "插值点7": (8 , 4),
-          
-        }
+    def __init__(self, osm_path: Optional[str] = None):
+        """
+        初始化变电站拓扑图。
+
+        Args:
+            osm_path: 可选的 OSM 地图路径；若为 None，则尝试使用默认
+                     'maps/substation.osm'，若仍失败则使用内置坐标。
+        """
+        # 变电站设备坐标
+        self.locations: Dict[str, Tuple[float, float]] = {}
+        self.osm_edges: List[Tuple[str, str]] = []
+
+        # 优先尝试从 OSM 文件加载
+        osm_candidate = osm_path or "maps/substation.osm"
+        try:
+            self.locations, self.osm_edges = load_graph_from_osm(osm_candidate)
+        except Exception:
+            # 回退到内置坐标 (兼容旧版本)
+            self.locations = {
+                "入口点": (9, 27),
+                "插值点1": (3, 28),
+                "低压配电室1": (-8, 29),
+                "低压配电室2": (-26, 29),
+                "低压配电室3": (-43, 29),
+                "高压配电区巡检点1": (-31, 13),
+                "高压配电区巡检点2": (-32, -1),
+                "高压配电区巡检点3": (-32, -17),
+                "变压器区1": (-28, 14),
+                "变压器区2": (-29, 0.91),
+                "变压器区3": (-28, -11),
+                "插值点2": (-30, -17),
+                "3SVG无功补偿区": (-43, -27),
+                "2SVG无功补偿区": (-23, -27),
+                "1SVG无功补偿区": (-8, -27),
+                "插值点3": (-1, -25),
+                "35kv配电箱1": (-2, -14),
+                "35kv配电箱2": (-2, 1),
+                "35kv配电箱3": (-2, 17),
+                "插值点4": (6, -25),
+                "插值点5": (6, -14),
+                "插值点6": (8, -14),
+                "插值点7": (8, 4),
+            }
         
         # 创建顶点字典
         self.vertices = {}
@@ -66,8 +87,8 @@ class SubstationGraph:
         """构建邻接表，基于变电站的物理布局"""
         adj_list = {}
         
-        # 定义连接关系 - 基于物理布局的合理路径
-        connections = [
+        # 若完整版 OSM 已包含 way 拓扑，优先使用地图中的连接关系。
+        connections = self.osm_edges or [
             # 入口区域连接
             ("入口点", "插值点1"),
             ("插值点1", "低压配电室1"),
@@ -122,8 +143,12 @@ class SubstationGraph:
         
         # 添加连接 (无向图，双向连接)
         for v1, v2 in connections:
-            adj_list[v1].append(v2)
-            adj_list[v2].append(v1)
+            if v1 not in adj_list or v2 not in adj_list:
+                continue
+            if v2 not in adj_list[v1]:
+                adj_list[v1].append(v2)
+            if v1 not in adj_list[v2]:
+                adj_list[v2].append(v1)
         
         return adj_list
     
@@ -239,7 +264,26 @@ class SubstationGraph:
     def get_all_locations(self) -> Dict[str, Tuple[float, float]]:
         """获取所有设备点"""
         return self.locations.copy()
-    
+
+    def get_charge_point(self, charge_point_name: Optional[str] = None) -> Tuple[str, float, float]:
+        """
+        获取充电点信息。
+
+        Args:
+            charge_point_name: 可选，指定充电点的节点名；为 None 则使用默认 "入口点"。
+                后续若新增独立充电点节点（如 "充电点"），传入该名即可，无需改其他代码。
+
+        Returns:
+            (name, x, y) 三元组。若指定名不存在则回退到 "入口点"。
+        """
+        name = charge_point_name or "入口点"
+        coords = self.locations.get(name)
+        if coords is None:
+            # 回退到入口点
+            name = "入口点"
+            coords = self.locations.get(name, (0.0, 0.0))
+        return name, coords[0], coords[1]
+
     def visualize_graph(self) -> str:
         """可视化图结构（文本形式）"""
         result = "变电站设备连接图:\n"

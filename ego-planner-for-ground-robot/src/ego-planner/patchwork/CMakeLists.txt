@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
         roscpp
         rospy
         std_msgs
+        nav_msgs
         roslaunch
         cv_bridge
         pcl_conversions

@@ -9,6 +9,7 @@ project(nlp_commander)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
+  nav_msgs
   rospy
   std_msgs
 )
@@ -105,7 +106,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES nlp_commander
-#  CATKIN_DEPENDS geometry_msgs rospy std_msgs
+  CATKIN_DEPENDS geometry_msgs nav_msgs rospy std_msgs
 #  DEPENDS system_lib
 )
 
@@ -161,6 +162,7 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   src/nlp_commander_node.py
+  substation_nlp_commander_node_v2.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

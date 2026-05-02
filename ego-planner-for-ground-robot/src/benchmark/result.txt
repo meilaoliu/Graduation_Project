@@ -1,0 +1,23 @@
+python3 analyze_stats.py --stats-file planning_stats_minco.csv --trial-file trial_results_minco.csv --planner-type minco --format chapter4
+============================================================
+  Planning Statistics (minco)
+  Total planning calls: 1146
+  Curvature outliers (>10.0 m^-1, capped): 82
+============================================================
+
+Metric                          Mean        Std        Min        Max
+-----------------------------------------------------------------
+Plan time (ms)                  1.65       1.36       0.00       9.00
+Traj time (s)                   5.96       1.15       1.90      17.01
+Traj length (m)                 7.95       1.50       2.04      15.83
+Max speed (m/s)               1.4443     0.0583     1.3619     2.0361
+Max curvature (m^-1)          1.5862     2.5339     0.0000    10.0000
+Iterations                      23.0       17.8        5.0      147.0
+Success rate (%)                96.7  (29/30)
+
+============================================================
+  LaTeX table values (chapter4):
+============================================================
+  minco & 1.65 & 5.96 & 7.95 & 1.5862 & 96.7 \\
+  
+  

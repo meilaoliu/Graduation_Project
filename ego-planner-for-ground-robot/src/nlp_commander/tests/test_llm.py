@@ -7,15 +7,17 @@
 import sys
 import os
 
-# 添加utils模块到路径
-sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+# 添加 nlp_commander 包根目录到路径
+PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, PACKAGE_DIR)
 
 from utils.llm_utils import LLMClient
 from utils.graph_utils import SubstationGraph
 
 def test_llm_function_call():
-    """测试LLM的Function Call功能"""
-    print("🧪 测试LLM Function Call功能")
+    """测试LLM JSON结构化输出功能"""
+    print("🧪 测试LLM JSON结构化输出功能")
     print("=" * 50)
     
     # 初始化客户端
@@ -49,8 +51,8 @@ def test_llm_function_call():
             if "error" in response:
                 print(f"❌ 错误: {response['error']}")
             else:
-                print(f"✅ 成功调用函数: {response.get('function_name')}")
-                print(f"📋 参数: {response.get('arguments')}")
+                print("✅ 成功获得结构化 JSON 输出")
+                print(f"📋 解析结果: {response.get('parsed')}")
                 
         except Exception as e:
             print(f"❌ 异常: {e}")

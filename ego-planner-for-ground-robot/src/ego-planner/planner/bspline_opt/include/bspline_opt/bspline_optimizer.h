@@ -82,6 +82,7 @@ namespace ego_planner
         bool BsplineOptimizeTrajRefine(const Eigen::MatrixXd &init_points, const double ts, Eigen::MatrixXd &optimal_points);
 
         inline int getOrder(void) { return order_; }
+        inline int getIterNum(void) { return iter_num_; }
 
     private:
         GridMap::Ptr grid_map_;
@@ -119,6 +120,8 @@ namespace ego_planner
         double dist0_;             // safe distance
         double max_vel_, max_acc_; // dynamic limits
         double max_k_, max_w_; // curvature and angular velocity limits
+        double max_k_inflation_;   // 离散控制点 κ_i 与连续轨迹 κ(t) 的经验倍率
+                                   // (约束阈值 = max_k_inflation_ * max_k_)
 
         int variable_num_;              // optimization variables
         int iter_num_;                  // iteration of the solver

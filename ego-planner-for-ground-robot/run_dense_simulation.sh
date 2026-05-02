@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Default values
-COUNT=200
-MIN_DIST=1.5
-SEED=42
+COUNT=160
+MIN_DIST=2.0
+SEED=45
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
