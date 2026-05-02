@@ -1,5 +1,5 @@
 <launch>
-  <arg name="initial_percentage" default="100.0"/>
+  <arg name="initial_percentage" default="50.0"/>
   <arg name="low_threshold" default="20.0"/>
   <arg name="odom_topic" default="/odom_adjust"/>
 
