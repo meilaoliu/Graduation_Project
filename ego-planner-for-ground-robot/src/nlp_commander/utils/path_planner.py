@@ -20,6 +20,7 @@ class PathPlanner:
             "无功补偿": ["1SVG无功补偿区", "2SVG无功补偿区", "3SVG无功补偿区"],
             "低压配电室": ["低压配电室1", "低压配电室2", "低压配电室3"],
             "高压配电": ["高压配电区巡检点1", "高压配电区巡检点2", "高压配电区巡检点3"],
+            "高压区": ["高压配电区巡检点1", "高压配电区巡检点2", "高压配电区巡检点3"],
             "变压器": ["变压器区1", "变压器区2", "变压器区3"],
             "35kv": ["35kv配电箱1", "35kv配电箱2", "35kv配电箱3"],
         }
@@ -141,9 +142,17 @@ class PathPlanner:
 
         return final_path
 
-    def plan_ordered_targets_path(self, current_pos: str, targets: List[str]) -> List[str]:
+    def plan_ordered_targets_path(
+        self,
+        current_pos: str,
+        targets: List[str],
+        deduplicate: bool = True,
+    ) -> List[str]:
         """按用户或大模型给定的显式顺序访问目标，并用 Dijkstra 补全中间路径。"""
-        ordered_targets = self._deduplicate_valid_targets(targets)
+        ordered_targets = (
+            self._deduplicate_valid_targets(targets)
+            if deduplicate else self._filter_valid_targets(targets)
+        )
         if not ordered_targets:
             return []
 
@@ -158,6 +167,10 @@ class PathPlanner:
             current_location = target
 
         return final_path
+
+    def _filter_valid_targets(self, targets: List[str]) -> List[str]:
+        """过滤未知目标但保留重复项，用于重复巡检任务。"""
+        return [target for target in targets if target in self.graph.locations]
 
     def _deduplicate_valid_targets(self, targets: List[str]) -> List[str]:
         """过滤未知目标并按首次出现顺序去重。"""

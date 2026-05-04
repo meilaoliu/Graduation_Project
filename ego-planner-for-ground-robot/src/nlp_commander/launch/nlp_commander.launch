@@ -8,6 +8,13 @@
   <arg name="arrive_tol"      default="0.5"/>
   <arg name="waypoint_z"      default="0.75"/>
   <arg name="charge_full_threshold" default="95.0"/>
+  <arg name="max_repeat_cycles" default="20"/>
+  <arg name="time_budget_min_remaining_s" default="30.0"/>
+  <arg name="max_time_budget_cycles" default="20"/>
+  <arg name="enable_predictive_charging" default="true"/>
+  <arg name="battery_full_range_m" default="300.0"/>
+  <arg name="battery_reserve_m" default="15.0"/>
+  <arg name="runtime_context_events" default="40"/>
 
   <node pkg="nlp_commander" type="substation_nlp_commander_node_v2.py"
         name="substation_nlp_commander_v2" output="screen">
@@ -16,5 +23,12 @@
     <param name="arrive_tolerance"       value="$(arg arrive_tol)"/>
     <param name="waypoint_z"             value="$(arg waypoint_z)"/>
     <param name="charge_full_threshold"  value="$(arg charge_full_threshold)"/>
+    <param name="max_repeat_cycles"      value="$(arg max_repeat_cycles)"/>
+    <param name="time_budget_min_remaining_s" value="$(arg time_budget_min_remaining_s)"/>
+    <param name="max_time_budget_cycles" value="$(arg max_time_budget_cycles)"/>
+    <param name="enable_predictive_charging" value="$(arg enable_predictive_charging)"/>
+    <param name="battery_full_range_m"   value="$(arg battery_full_range_m)"/>
+    <param name="battery_reserve_m"      value="$(arg battery_reserve_m)"/>
+    <param name="runtime_context_events" value="$(arg runtime_context_events)"/>
   </node>
 </launch>

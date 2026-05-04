@@ -7,6 +7,7 @@
   <!-- topic of your odometry such as VIO or LIO -->
   <arg name="odom_topic" value="/state_estimation" />
   <arg name="pointcloud_topic" value="/registered_scan" />
+  <arg name="use_rqt_robot_steering" value="true" />
 
   <!-- 1: use 2D Nav Goal to select goal  -->
   <!-- 2: use global waypoints below  -->
@@ -40,16 +41,16 @@
     <arg name="fy" value="387.229248046875"/>
 
     <!-- maximum velocity and acceleration the drone will reach -->
-    <arg name="max_vel" value="1.5" />
-    <arg name="max_acc" value="3" />
-    <arg name="max_jer" value="8.0" />
+    <arg name="max_vel" value="1.3" />
+    <arg name="max_acc" value="2" />
+    <arg name="max_jer" value="5.0" />
     <!-- maximum angular velocity, curvature and angular velocity -->
-    <arg name="max_w" value="1.5" />
-    <arg name="max_k" value="1.5" />
-    <arg name="max_k_inflation" value="7.0" />
+    <arg name="max_w" value="2.0" />
+    <arg name="max_k" value="2.0" />
+    <arg name="max_k_inflation" value="8.0" />
 
     <!--always set to 1.5 times grater than sensing horizen-->
-    <arg name="planning_horizon" value="7.5" />
+    <arg name="planning_horizon" value="5.0" />
 
     <!-- 1: use 2D Nav Goal to select goal  -->
     <!-- 2: use global waypoints below  -->
@@ -143,6 +144,10 @@
 
     
   </include>
+
+  <node if="$(arg use_rqt_robot_steering)" pkg="rqt_robot_steering" type="rqt_robot_steering" name="rqt_robot_steering" output="screen">
+    <param name="default_topic" value="/cmd_vel" />
+  </node>
 
   <!-- trajectory server -->
 

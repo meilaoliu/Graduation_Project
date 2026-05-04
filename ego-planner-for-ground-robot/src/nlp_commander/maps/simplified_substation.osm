@@ -162,7 +162,6 @@
   <way id="119"><nd ref="13"/><nd ref="14"/><tag k="name" v="3SVG无功补偿区-2SVG无功补偿区"/></way>
   <way id="120"><nd ref="14"/><nd ref="15"/><tag k="name" v="2SVG无功补偿区-1SVG无功补偿区"/></way>
   <way id="121"><nd ref="15"/><nd ref="17"/><tag k="name" v="1SVG无功补偿区-35kv配电箱1"/></way>
-  <way id="122"><nd ref="14"/><nd ref="18"/><tag k="name" v="2SVG无功补偿区-35kv配电箱2"/></way>
   <way id="123"><nd ref="13"/><nd ref="8"/><tag k="name" v="3SVG无功补偿区-高压配电区巡检点3"/></way>
   <way id="124"><nd ref="16"/><nd ref="17"/><tag k="name" v="插值点3-35kv配电箱1"/></way>
   <way id="125"><nd ref="16"/><nd ref="15"/><tag k="name" v="插值点3-1SVG无功补偿区"/></way>

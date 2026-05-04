@@ -18,7 +18,7 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 if PACKAGE_DIR not in sys.path:
     sys.path.insert(0, PACKAGE_DIR)
 
-from utils import SubstationGraph, LLMClient, PathPlanner, WaypointManager, SegmentScheduler
+from utils import IntentNormalizer, LLMClient, PathPlanner, RuntimeEventLog, WaypointManager, SegmentScheduler
 
 class SubstationNlpCommanderV2:
     """变电站智能巡检指挥官 V2.0"""
@@ -29,7 +29,9 @@ class SubstationNlpCommanderV2:
         # 初始化各个模块
         self.llm_client = LLMClient()
         self.path_planner = PathPlanner()
+        self.intent_normalizer = IntentNormalizer(self.path_planner.graph.get_all_locations().keys())
         self.waypoint_manager = WaypointManager()
+        self.runtime_event_log = RuntimeEventLog(max_events=int(rospy.get_param('~runtime_context_events', 40)))
         
         # 设置回调函数
         self.waypoint_manager.set_callbacks(
@@ -44,6 +46,7 @@ class SubstationNlpCommanderV2:
                 graph=self.path_planner.graph,
                 get_current_xy=self.waypoint_manager.get_current_coordinates,
                 say=lambda m: self._say(m),
+                on_event=self._on_runtime_event,
             )
             rospy.loginfo("已启用全局轨迹分段调度模式 (use_global_traj=True)")
         else:
@@ -75,6 +78,33 @@ class SubstationNlpCommanderV2:
             self._chat_out_pub.publish(String(data=str(text)))
         except Exception:
             pass
+
+    def _on_runtime_event(self, event: dict):
+        self.runtime_event_log.add(
+            event.get("event_type", "runtime_event"),
+            event.get("message", ""),
+            **(event.get("data") or {}),
+        )
+
+    def _runtime_context_text(self) -> str:
+        parts = []
+        if self.segment_scheduler is not None:
+            scheduler_status = self.segment_scheduler.status()
+            parts.append(
+                "调度器状态: "
+                f"active={scheduler_status.get('active')}, "
+                f"current_segment={scheduler_status.get('current_segment')}, "
+                f"kind={scheduler_status.get('current_segment_kind')}, "
+                f"remaining={scheduler_status.get('remaining_segments')}, "
+                f"battery={scheduler_status.get('battery_pct'):.1f}%, "
+                f"low_battery={scheduler_status.get('low_battery')}, "
+                f"returning_to_charge={scheduler_status.get('returning_to_charge')}"
+            )
+            parts.append("调度器近期反馈:\n" + scheduler_status.get("runtime_context", "无"))
+        local_events = self.runtime_event_log.to_prompt_text()
+        if local_events != "无":
+            parts.append("节点近期反馈:\n" + local_events)
+        return "\n".join(parts) if parts else "无"
     
     def on_waypoint_reached(self, waypoint_name: str):
         """航点到达回调"""
@@ -84,7 +114,15 @@ class SubstationNlpCommanderV2:
         """任务完成回调"""
         self._say("🎉 巡检任务完成！准备接收新指令...")
     
-    def handle_navigation_request(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> str:
+    def handle_navigation_request(
+        self,
+        waypoint_sequence: list,
+        task_description: str,
+        task_type: str = None,
+        execution_options: dict = None,
+        target_specs: list = None,
+        route_policy: dict = None,
+    ) -> str:
         """
         处理导航请求
         
@@ -113,6 +151,12 @@ class SubstationNlpCommanderV2:
             else:
                 current_pos = "入口点"  # 兜底方案
         
+        execution_options = execution_options or {}
+        target_specs = target_specs or [
+            {"name": name, "stop_required": True, "photo_required": True}
+            for name in waypoint_sequence
+        ]
+        route_policy = route_policy or {}
         # 智能分析航点序列，确定最佳路径规划策略
         planned_path = []
         
@@ -130,9 +174,12 @@ class SubstationNlpCommanderV2:
             planned_path = self.path_planner.plan_path_to_single_target(current_pos, target)
             
         elif task_analysis["type"] == "area_inspection":
-            # 区域巡检 - 使用多目标优化
+            # 区域巡检：默认优化顺序；LLM 明确要求保序时按给定顺序补全拓扑路径。
             rospy.loginfo(f"区域巡检路径规划: {current_pos} -> {task_analysis['targets']}")
-            planned_path = self.path_planner.plan_multi_target_path(current_pos, task_analysis["targets"])
+            if route_policy.get("optimize_order", True) and not execution_options.get("preserve_order", False):
+                planned_path = self.path_planner.plan_multi_target_path(current_pos, task_analysis["targets"])
+            else:
+                planned_path = self.path_planner.plan_ordered_targets_path(current_pos, task_analysis["targets"])
             
         elif task_analysis["type"] == "full_inspection":
             # 完整巡检 - 使用预定义的最优路径
@@ -144,7 +191,11 @@ class SubstationNlpCommanderV2:
             user_targets = self._expand_and_validate_targets(waypoint_sequence)
             rospy.loginfo(f"自定义路径规划: {current_pos} -> {user_targets}")
             if user_targets:
-                planned_path = self.path_planner.plan_ordered_targets_path(current_pos, user_targets)
+                planned_path = self.path_planner.plan_ordered_targets_path(
+                    current_pos,
+                    user_targets,
+                    deduplicate=not execution_options.get("preserve_order", False),
+                )
         
         # 验证路径
         if not planned_path:
@@ -154,24 +205,45 @@ class SubstationNlpCommanderV2:
         if not self.path_planner.validate_path(planned_path):
             rospy.logwarn("警告：规划的路径可能不连通，但仍会尝试执行")
         
+        # 根据实际路径生成一次巡检的停留访问序列，途经点不再重复停留/拍照。
+        stop_sequence = self._build_stop_sequence(
+            planned_path,
+            task_analysis["targets"],
+            task_analysis["type"],
+            target_specs,
+        )
+        repeat_count = self._resolve_repeat_count(execution_options, planned_path, stop_sequence)
+        if repeat_count > 1 and stop_sequence:
+            repeated_targets = stop_sequence * repeat_count
+            repeated_target_names = [spec["name"] for spec in repeated_targets]
+            rospy.loginfo(f"重复巡检扩展为 {repeat_count} 遍: {repeated_target_names}")
+            planned_path = self.path_planner.plan_ordered_targets_path(
+                current_pos,
+                repeated_target_names,
+                deduplicate=False,
+            )
+            if not planned_path:
+                return f"❌ 无法规划重复巡检路径: {stop_sequence} x {repeat_count}"
+            stop_sequence = repeated_targets
+
         # 计算路径距离
         path_distance = self.path_planner.get_path_distance(planned_path)
-        
-        # 根据目标设备集合生成停留标志：目标设备、起点和终点需要停留，过渡点仅通过。
-        stop_flags = self._assign_stop_flags(planned_path, task_analysis["targets"])
+
+        # 只按 stop_sequence 中的目标顺序停留。重复出现在路径中的已巡检目标会作为途经点通过。
+        stop_flags, photo_flags = self._assign_execution_flags(planned_path, stop_sequence)
 
         # 启动导航任务（按模式分支）
         if self.segment_scheduler is not None:
             # 解析 (name, (x,y), stop) 元组列表
             wp_tuples = []
-            for name, stop in zip(planned_path, stop_flags):
+            for name, stop, photo in zip(planned_path, stop_flags, photo_flags):
                 coords = self.path_planner.graph.get_location_coordinates(name)
                 if coords is None:
                     continue
-                wp_tuples.append((name, coords, stop))
+                wp_tuples.append((name, coords, stop, photo))
             if not wp_tuples:
                 return f"❌ 无法解析任何航点坐标: {planned_path}"
-            result = self.segment_scheduler.start_task(wp_tuples, task_description)
+            result = self.segment_scheduler.start_task(wp_tuples, task_description, execution_options)
         else:
             result = self.waypoint_manager.start_navigation_task(
                 planned_path, task_description, stop_flags)
@@ -180,28 +252,140 @@ class SubstationNlpCommanderV2:
         result += f"\n📏 路径总距离: {path_distance:.1f}米"
         result += f"\n🛣️ 详细路径: {' → '.join(planned_path)}"
         result += f"\n🛑 停留点: {' → '.join([name for name, stop in zip(planned_path, stop_flags) if stop])}"
+        photo_points = [name for name, photo in zip(planned_path, photo_flags) if photo]
+        if photo_points:
+            result += f"\n📷 拍照点: {' → '.join(photo_points)}"
+        if repeat_count > 1:
+            result += f"\n🔁 重复巡检: {repeat_count}遍"
+        option_text = self._format_execution_options(execution_options)
+        if option_text:
+            result += f"\n⏱️ 执行约束: {option_text}"
         
         return result
 
-    def _assign_stop_flags(self, planned_path: list, target_devices: list) -> list:
-        """为全局 Waypoint 序列生成停留标志。"""
+    def _build_stop_sequence(
+        self,
+        planned_path: list,
+        target_devices: list,
+        task_type: str,
+        target_specs: list = None,
+    ) -> list:
+        """生成本轮真正需要停留拍照的目标访问序列。"""
         if not planned_path:
             return []
 
-        target_set = set(target_devices)
-        last_index = len(planned_path) - 1
+        spec_by_name = {}
+        for spec in target_specs or []:
+            name = spec.get("name") if isinstance(spec, dict) else None
+            if name in self.path_planner.graph.locations and name not in spec_by_name:
+                spec_by_name[name] = {
+                    "name": name,
+                    "stop_required": bool(spec.get("stop_required", True)),
+                    "photo_required": bool(spec.get("photo_required", True)),
+                }
+
+        valid_targets = [name for name in target_devices if name in self.path_planner.graph.locations]
+        if task_type == "full_inspection" and not valid_targets:
+            valid_targets = self._default_inspection_targets()
+
+        if not valid_targets:
+            return [{"name": planned_path[-1], "stop_required": True, "photo_required": True}] if len(planned_path) > 1 else []
+
+        # 区域/全站巡检通常由 Dijkstra 贪心决定实际访问顺序，按路径中的首次出现确定停留顺序。
+        if task_type in {"area_inspection", "full_inspection"}:
+            target_set = set(valid_targets)
+            seen = set()
+            sequence = []
+            for index, name in enumerate(planned_path):
+                if index == 0:
+                    continue
+                if name in target_set and name not in seen:
+                    sequence.append(spec_by_name.get(name, {"name": name, "stop_required": True, "photo_required": True}))
+                    seen.add(name)
+            for name in valid_targets:
+                if name not in seen:
+                    sequence.append(spec_by_name.get(name, {"name": name, "stop_required": True, "photo_required": True}))
+            return sequence
+
         return [
-            index == 0 or index == last_index or waypoint_name in target_set
-            for index, waypoint_name in enumerate(planned_path)
+            spec_by_name.get(name, {"name": name, "stop_required": True, "photo_required": True})
+            for name in valid_targets
         ]
+
+    def _assign_execution_flags(self, planned_path: list, target_sequence: list) -> tuple:
+        """为全局 Waypoint 序列生成停留和拍照标志。"""
+        if not planned_path:
+            return [], []
+
+        flags = [False] * len(planned_path)
+        photo_flags = [False] * len(planned_path)
+        next_target_index = 0
+        for index, waypoint_name in enumerate(planned_path):
+            if index == 0:
+                continue
+            if next_target_index >= len(target_sequence):
+                break
+            target_spec = target_sequence[next_target_index]
+            if waypoint_name == target_spec["name"]:
+                flags[index] = bool(target_spec.get("stop_required", True))
+                photo_flags[index] = flags[index] and bool(target_spec.get("photo_required", True))
+                next_target_index += 1
+
+        if len(planned_path) > 1 and not any(flags):
+            flags[-1] = True
+            photo_flags[-1] = True
+        return flags, photo_flags
+
+    def _default_inspection_targets(self) -> list:
+        """默认巡检目标：排除入口点和插值点。"""
+        return [
+            name for name in self.path_planner.graph.locations
+            if name != "入口点" and not name.startswith("插值点")
+        ]
+
+    def _resolve_repeat_count(self, execution_options: dict, planned_path: list, stop_sequence: list) -> int:
+        explicit_count = self._safe_positive_int(execution_options.get("repeat_count"), default=1)
+        if explicit_count > 1:
+            return min(explicit_count, self._max_repeat_cycles())
+        return 1
+
+    def _max_repeat_cycles(self) -> int:
+        return max(1, int(rospy.get_param("~max_repeat_cycles", 20)))
+
+    @staticmethod
+    def _safe_positive_int(value, default: int = 1) -> int:
+        try:
+            parsed = int(value)
+            return parsed if parsed > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _format_execution_options(self, execution_options: dict) -> str:
+        parts = []
+        if self._safe_positive_int(execution_options.get("repeat_count"), default=1) > 1:
+            parts.append(f"重复{int(execution_options['repeat_count'])}遍")
+        duration_minutes = self._safe_float(execution_options.get("duration_minutes"))
+        if duration_minutes and duration_minutes > 0:
+            parts.append(f"约{duration_minutes:g}分钟")
+        until_text = execution_options.get("until_time")
+        if until_text:
+            parts.append(f"巡检到{until_text}")
+        return "，".join(parts)
     
     def _analyze_waypoint_sequence(self, waypoint_sequence: list, task_description: str, task_type: str = None) -> dict:
         """分析航点序列，确定任务类型和目标"""
-        
-        # 根据任务描述和航点数量判断任务类型
-        description_lower = task_description.lower()
         rospy.loginfo(f"分析任务: 描述='{task_description}', 航点={waypoint_sequence}")
         normalized_task_type = (task_type or "").strip()
+
+        if normalized_task_type in {"return_home", "go_home", "return_to_base", "charge"}:
+            return {"type": "single_target", "targets": ["入口点"]}
 
         if normalized_task_type in {"single_target", "area_inspection", "full_inspection", "custom_path"}:
             rospy.loginfo(f"采用LLM输出的任务类型: {normalized_task_type}")
@@ -210,25 +394,6 @@ class SubstationNlpCommanderV2:
 
             expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
             return {"type": normalized_task_type, "targets": expanded_targets}
-        
-        # 完整巡检判断
-        if any(keyword in description_lower for keyword in ["完整", "全面", "所有", "整个变电站", "巡检一圈"]):
-            rospy.loginfo("识别为完整巡检任务")
-            return {
-                "type": "full_inspection",
-                "targets": waypoint_sequence
-            }
-        
-        # 区域巡检判断
-        area_keywords = ["svg", "无功补偿", "低压配电室", "高压配电", "变压器", "35kv", "区域", "区"]
-        if any(keyword in description_lower for keyword in area_keywords):
-            # 扩展区域内的所有设备
-            expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
-            rospy.loginfo(f"识别为区域巡检任务，扩展目标: {expanded_targets}")
-            return {
-                "type": "area_inspection", 
-                "targets": expanded_targets
-            }
         
         # 单目标判断
         if len(waypoint_sequence) == 1:
@@ -241,7 +406,7 @@ class SubstationNlpCommanderV2:
         
         # 多目标自定义路径
         expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
-        rospy.loginfo(f"识别为自定义多目标任务，扩展目标: {expanded_targets}")
+        rospy.loginfo(f"旧接口未提供 task_type，按自定义多目标任务处理: {expanded_targets}")
         return {
             "type": "custom_path",
             "targets": expanded_targets
@@ -292,7 +457,10 @@ class SubstationNlpCommanderV2:
         
         # 调用LLM处理指令
         llm_response = self.llm_client.process_inspection_command(
-            command, current_pos_info, available_locations
+            command,
+            current_pos_info,
+            available_locations,
+            runtime_context=self._runtime_context_text(),
         )
         
         # 处理LLM响应
@@ -315,21 +483,25 @@ class SubstationNlpCommanderV2:
 
     def _handle_structured_llm_result(self, parsed: dict, original_command: str) -> str:
         """将 CoT + JSON 语义解析结果转换为路径规划请求。"""
-        task_type = parsed.get("task_type", "").strip()
-        task_description = parsed.get("task_description") or original_command
-        target_devices = parsed.get("target_devices", [])
-        target_names = self._extract_target_names(target_devices)
+        normalized = self.intent_normalizer.normalize(parsed, original_command)
+        if not normalized.get("success"):
+            return f"❌ {normalized.get('error', 'LLM未返回有效结构化意图')}"
 
-        if task_type != "full_inspection" and not target_names:
-            return "❌ LLM未返回有效目标设备，请换一种更明确的巡检指令。"
+        task_type = normalized["task_type"]
+        task_description = normalized["task_description"]
+        target_specs = normalized["targets"]
+        target_names = [spec["name"] for spec in target_specs]
 
         result = self.handle_navigation_request(
             waypoint_sequence=target_names,
             task_description=task_description,
             task_type=task_type,
+            execution_options=normalized["execution"],
+            target_specs=target_specs,
+            route_policy=normalized["route_policy"],
         )
 
-        reasoning = parsed.get("reasoning")
+        reasoning = normalized.get("reasoning")
         if reasoning:
             result += f"\n🧠 语义解析: {reasoning}"
         return result
@@ -357,7 +529,7 @@ class SubstationNlpCommanderV2:
 
         normalized_devices.sort(key=lambda item: item[0])
         return [name for _, name in normalized_devices]
-    
+
     def show_help(self):
         """显示帮助信息"""
         print("=" * 70)

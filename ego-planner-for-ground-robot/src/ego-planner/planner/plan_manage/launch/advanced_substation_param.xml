@@ -162,7 +162,7 @@
     <param name="grid_map/local_update_range_x"  value="8.0" />
     <param name="grid_map/local_update_range_y"  value="8.0" />
     <param name="grid_map/local_update_range_z"  value="1.5" />
-    <param name="grid_map/obstacles_inflation"     value="0.5" />
+    <param name="grid_map/obstacles_inflation"     value="0.3" />
     <param name="grid_map/local_map_margin" value="2"/>
     <param name="grid_map/ground_height"        value="-0.01"/>
     <!-- camera parameter -->
@@ -185,7 +185,7 @@
     <param name="grid_map/p_max"  value="0.90"/>
     <param name="grid_map/p_occ"  value="0.80"/>
     <param name="grid_map/min_ray_length" value="0.1"/>
-    <param name="grid_map/max_ray_length" value="4.0"/>
+    <param name="grid_map/max_ray_length" value="8.0"/>
 
     <param name="grid_map/virtual_ceil_height"   value="2.5"/>
     <param name="grid_map/visualization_truncate_height"   value="1.6"/>
@@ -195,25 +195,26 @@
     <param name="grid_map/frame_id"      value="map"/>
 
   <!-- planner manager -->
-    <param name="manager/use_minco" value="false" type="bool"/>
+    <!--use_minco：true = 使用minco轨迹，false = 使用B样条轨迹-->
+    <param name="manager/use_minco" value="true" type="bool"/>
     <param name="manager/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="manager/max_acc" value="$(arg max_acc)" type="double"/>
-    <param name="manager/max_jerk" value="4" type="double"/>
+    <param name="manager/max_w" value="$(arg max_w)" type="double"/>
     <param name="manager/control_points_distance" value="0.6" type="double"/>
     <param name="manager/polyTraj_piece_length" value="1.5" type="double"/>
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
+    <!--是否开启拓扑同伦轨迹（会增加计算量）-->
     <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>
     <param name="optimization/lambda_collision" value="0.8" type="double"/>
-    <param name="optimization/lambda_feasibility" value="0.1" type="double"/>
+    <param name="optimization/lambda_feasibility" value="1.5" type="double"/>
     <param name="optimization/lambda_fitness" value="1.0" type="double"/>
     <param name="optimization/dist0" value="1.0" type="double"/>
     <param name="optimization/max_vel" value="$(arg max_vel)" type="double"/>
     <param name="optimization/max_acc" value="$(arg max_acc)" type="double"/>
-    <param name="optimization/max_jerk" value="$(arg max_jer)" type="double"/>
     <param name="optimization/max_w" value="$(arg max_w)" type = "double"/>
     <param name="optimization/max_k" value="$(arg max_k)" type = "double"/>
     <param name="optimization/max_k_inflation" value="$(arg max_k_inflation)" type="double"/>
@@ -222,25 +223,24 @@
     <param name="bspline/limit_acc" value="$(arg max_acc)" type="double"/>
     <param name="bspline/limit_ratio" value="1.1" type="double"/>
 
-    <!-- MINCO optimization parameters -->
-    <param name="optimization/constraint_points_perPiece" value="5" type="int"/>
-    <param name="optimization/weight_obstacle" value="800.0" type="double"/>
-    <param name="optimization/weight_obstacle_soft" value="800.0" type="double"/>
+    <!-- MINCO optimization parameters (与已验证稳定配置保持一致) -->
+    <param name="optimization/constraint_points_perPiece" value="6" type="int"/>
+    <param name="optimization/weight_obstacle" value="1000.0" type="double"/>
+    <param name="optimization/weight_obstacle_soft" value="1000.0" type="double"/>
     <param name="optimization/weight_feasibility" value="1500.0" type="double"/>
-    <param name="optimization/weight_curv" value="1000.0" type="double"/>
-    <param name="optimization/weight_sqrvariance" value="900.0" type="double"/>
+    <param name="optimization/weight_curv" value="100.0" type="double"/>
+    <param name="optimization/weight_sqrvariance" value="1000.0" type="double"/>
     <param name="optimization/weight_time" value="300.0" type="double"/>
-    <param name="optimization/obstacle_clearance" value="0.5" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="1.0" type="double"/>
+    <param name="optimization/obstacle_clearance" value="0.15" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.25" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
-    <param name="optimization/velocity_singularity_eps" value="0.01" type="double"/>
 
     <!-- MPC 控制器参数 -->
-    <param name="MPC/v_max" value="1.5" type="double"/>
-    <param name="MPC/w_max" value="1.5" type="double"/>
+    <param name="MPC/v_max" value="$(arg max_vel)" type="double"/>
+    <param name="MPC/w_max" value="$(arg max_w)" type="double"/>
     <param name="MPC/w_pos" value="1.0" type="double"/>
-    <param name="MPC/w_ang" value="5.0" type="double"/>
-    <param name="MPC/rho_N" value="10.0" type="double"/>
+    <param name="MPC/w_ang" value="3.0" type="double"/>
+    <param name="MPC/rho_N" value="5.0" type="double"/>
     <param name="MPC/r_v" value="0.1" type="double"/>
     <param name="MPC/r_w" value="0.1" type="double"/>
     <param name="MPC/use_feedforward" value="true" type="bool"/>

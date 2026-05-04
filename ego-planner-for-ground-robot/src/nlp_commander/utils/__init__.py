@@ -4,8 +4,10 @@
 """
 
 from .graph_utils import SubstationGraph
+from .intent_normalizer import IntentNormalizer
 from .llm_utils import LLMClient
 from .path_planner import PathPlanner
+from .runtime_policy import BatteryPolicy, RuntimeEventLog
 
 try:
     from .waypoint_manager import WaypointManager
@@ -19,8 +21,11 @@ except ImportError:
 
 __all__ = [
     'SubstationGraph',
+    'IntentNormalizer',
     'LLMClient', 
     'PathPlanner',
+    'BatteryPolicy',
+    'RuntimeEventLog',
     'WaypointManager',
     'SegmentScheduler',
 ] 
