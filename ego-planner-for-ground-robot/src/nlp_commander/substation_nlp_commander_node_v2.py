@@ -18,10 +18,18 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 if PACKAGE_DIR not in sys.path:
     sys.path.insert(0, PACKAGE_DIR)
 
-from utils import IntentNormalizer, LLMClient, PathPlanner, RuntimeEventLog, WaypointManager, SegmentScheduler
+from utils import IntentNormalizer, LLMClient, PathPlanner, RuntimeEventLog, TaskAgentRuntime, WaypointManager, SegmentScheduler
 
 class SubstationNlpCommanderV2:
     """变电站智能巡检指挥官 V2.0"""
+
+    STAGE_PRESERVING_ABORT_REASONS = {
+        "agent_retry_failed_target",
+        "agent_skip_target",
+        "agent_reorder_remaining_targets",
+        "agent_resume_remaining_task",
+        "agent_go_charge",
+    }
     
     def __init__(self):
         rospy.init_node('substation_nlp_commander_v2', anonymous=True)
@@ -32,6 +40,14 @@ class SubstationNlpCommanderV2:
         self.intent_normalizer = IntentNormalizer(self.path_planner.graph.get_all_locations().keys())
         self.waypoint_manager = WaypointManager()
         self.runtime_event_log = RuntimeEventLog(max_events=int(rospy.get_param('~runtime_context_events', 40)))
+        self._active_task_context = None
+        self._last_task_summary = ""
+        self._pending_task_stages = []
+        self._multi_stage_command = ""
+        self._multi_stage_total = 0
+        self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._chat_out_pub = rospy.Publisher('/chat_out', String, queue_size=20)
+        rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
         
         # 设置回调函数
         self.waypoint_manager.set_callbacks(
@@ -53,11 +69,24 @@ class SubstationNlpCommanderV2:
             self.segment_scheduler = None
             rospy.loginfo("使用经典逐航点导航模式 (use_global_traj=False)")
 
-        # 聊天通道：与 Web Dashboard / 其他外部 UI 双向交互
-        self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
-        self._chat_out_pub = rospy.Publisher('/chat_out', String, queue_size=20)
-        rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
-        
+        self.agent_runtime = TaskAgentRuntime(
+            path_planner=self.path_planner,
+            handle_navigation_request=self.handle_navigation_request,
+            segment_scheduler=self.segment_scheduler,
+            waypoint_manager=self.waypoint_manager,
+            llm_callable=self._agent_llm_call,
+            say=lambda m: self._say(m),
+            enabled=bool(rospy.get_param('~enable_agent_runtime', True)),
+            max_tool_iterations=int(rospy.get_param('~agent_max_tool_iterations', 6)),
+            min_tool_calls_before_final=int(rospy.get_param('~agent_min_tool_calls_before_final', 2)),
+            min_confidence=float(rospy.get_param('~agent_min_confidence', 0.35)),
+            max_retry_per_target=int(rospy.get_param('~agent_max_retry_per_target', 1)),
+            max_consecutive_failures=int(rospy.get_param('~agent_max_consecutive_failures', 3)),
+            nominal_speed_mps=float(rospy.get_param('~time_budget_nominal_speed', 0.8)),
+            battery_full_range_m=float(rospy.get_param('~battery_full_range_m', 300.0)),
+            battery_reserve_m=float(rospy.get_param('~battery_reserve_m', 15.0)),
+        )
+
         rospy.loginfo("变电站智能巡检指挥官 V2.0 已就绪")
 
     # ------------------------- 聊天通道 -------------------------
@@ -85,9 +114,77 @@ class SubstationNlpCommanderV2:
             event.get("message", ""),
             **(event.get("data") or {}),
         )
+        event_type = event.get("event_type", "runtime_event")
+        stage_preserving_abort = event_type == "task_aborted" and self._is_stage_preserving_abort(event)
+        if event_type in {"task_completed", "task_aborted", "time_budget_finished"} and not stage_preserving_abort:
+            self._last_task_summary = self._build_task_context_summary(event)
+            if event_type in {"task_completed", "task_aborted"}:
+                self._active_task_context = None
+        if event_type == "task_aborted" and not stage_preserving_abort:
+            self._pending_task_stages = []
+            self._multi_stage_command = ""
+            self._multi_stage_total = 0
+        if hasattr(self, "agent_runtime"):
+            self._cmd_queue.put(('runtime_event', event))
+
+    def _is_stage_preserving_abort(self, event: dict) -> bool:
+        data = event.get("data") or {}
+        return str(data.get("reason") or "") in self.STAGE_PRESERVING_ABORT_REASONS
+
+    def _build_task_context_summary(self, terminal_event: dict) -> str:
+        events = self.runtime_event_log.to_list()
+        completed = []
+        failures = []
+        anomalies = []
+        for item in events:
+            event_type = item.get("event_type")
+            data = item.get("data") or {}
+            if event_type == "segment_finished":
+                end_name = data.get("end_name") or data.get("target")
+                if end_name and end_name not in completed:
+                    completed.append(end_name)
+            elif event_type == "segment_failed":
+                target = data.get("failed_target") or data.get("target") or data.get("current_target")
+                failures.append(f"{target or '未知目标'}:{item.get('message', '')}")
+            elif event_type == "progress_anomaly":
+                target = data.get("failed_target") or data.get("target") or data.get("current_target")
+                reason = data.get("reason", "unknown")
+                anomalies.append(f"{target or '未知目标'}:{reason}")
+
+        plan = self._active_task_context or {}
+        lines = ["上一任务摘要:"]
+        if plan.get("command"):
+            lines.append(f"- 用户指令: {plan.get('command')}")
+        if plan.get("task_type") or plan.get("targets"):
+            lines.append(
+                f"- 任务类型: {plan.get('task_type', 'unknown')}; 目标: {plan.get('targets', [])}"
+            )
+        if plan.get("execution"):
+            lines.append(f"- 执行约束: {plan.get('execution')}")
+        lines.append(f"- 已完成目标: {completed if completed else '无'}")
+        if anomalies:
+            lines.append(f"- 进度异常: {anomalies[-5:]}")
+        if failures:
+            lines.append(f"- 失败记录: {failures[-5:]}")
+        lines.append(
+            f"- 结束状态: {terminal_event.get('event_type')} - {terminal_event.get('message', '')}"
+        )
+        return "\n".join(lines)
+
+    def _agent_llm_call(self, messages, tools):
+        response = self.llm_client.chat_json(
+            messages=messages,
+            temperature=float(rospy.get_param('~agent_temperature', 0.1)),
+            max_tokens=int(rospy.get_param('~agent_max_tokens', 2048)),
+        )
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return response.get("parsed", response)
 
     def _runtime_context_text(self) -> str:
         parts = []
+        if self._last_task_summary:
+            parts.append(self._last_task_summary)
         if self.segment_scheduler is not None:
             scheduler_status = self.segment_scheduler.status()
             parts.append(
@@ -104,6 +201,8 @@ class SubstationNlpCommanderV2:
         local_events = self.runtime_event_log.to_prompt_text()
         if local_events != "无":
             parts.append("节点近期反馈:\n" + local_events)
+        if hasattr(self, "agent_runtime"):
+            parts.append("Agent世界模型:\n" + self.agent_runtime.world_model.to_prompt_context(max_events=8))
         return "\n".join(parts) if parts else "无"
     
     def on_waypoint_reached(self, waypoint_name: str):
@@ -157,6 +256,14 @@ class SubstationNlpCommanderV2:
             for name in waypoint_sequence
         ]
         route_policy = route_policy or {}
+        if task_type == "go_charge" and self.segment_scheduler is not None:
+            result = self.segment_scheduler.start_charge_task(start_name=current_pos, reason="user_go_charge")
+            planned_path = self.path_planner.plan_path_to_single_target(current_pos, "入口点") or [current_pos, "入口点"]
+            result += f"\n📏 路径总距离: {self.path_planner.get_path_distance(planned_path):.1f}米"
+            result += f"\n🛣️ 详细路径: {' → '.join(planned_path)}"
+            result += "\n🛑 停留点: 入口点"
+            return result
+
         # 智能分析航点序列，确定最佳路径规划策略
         planned_path = []
         
@@ -211,7 +318,21 @@ class SubstationNlpCommanderV2:
             task_analysis["targets"],
             task_analysis["type"],
             target_specs,
+            include_start_target=self._should_include_start_target(
+                planned_path,
+                task_analysis["targets"],
+                task_analysis["type"],
+                target_specs,
+            ),
         )
+        include_start_target = bool(
+            stop_sequence
+            and planned_path
+            and stop_sequence[0].get("name") == planned_path[0]
+        )
+        scheduler_execution_options = dict(execution_options)
+        if include_start_target:
+            scheduler_execution_options["include_start_target"] = True
         repeat_count = self._resolve_repeat_count(execution_options, planned_path, stop_sequence)
         if repeat_count > 1 and stop_sequence:
             repeated_targets = stop_sequence * repeat_count
@@ -230,7 +351,11 @@ class SubstationNlpCommanderV2:
         path_distance = self.path_planner.get_path_distance(planned_path)
 
         # 只按 stop_sequence 中的目标顺序停留。重复出现在路径中的已巡检目标会作为途经点通过。
-        stop_flags, photo_flags = self._assign_execution_flags(planned_path, stop_sequence)
+        stop_flags, photo_flags = self._assign_execution_flags(
+            planned_path,
+            stop_sequence,
+            include_start_target=include_start_target,
+        )
 
         # 启动导航任务（按模式分支）
         if self.segment_scheduler is not None:
@@ -243,7 +368,7 @@ class SubstationNlpCommanderV2:
                 wp_tuples.append((name, coords, stop, photo))
             if not wp_tuples:
                 return f"❌ 无法解析任何航点坐标: {planned_path}"
-            result = self.segment_scheduler.start_task(wp_tuples, task_description, execution_options)
+            result = self.segment_scheduler.start_task(wp_tuples, task_description, scheduler_execution_options)
         else:
             result = self.waypoint_manager.start_navigation_task(
                 planned_path, task_description, stop_flags)
@@ -269,6 +394,7 @@ class SubstationNlpCommanderV2:
         target_devices: list,
         task_type: str,
         target_specs: list = None,
+        include_start_target: bool = False,
     ) -> list:
         """生成本轮真正需要停留拍照的目标访问序列。"""
         if not planned_path:
@@ -297,7 +423,7 @@ class SubstationNlpCommanderV2:
             seen = set()
             sequence = []
             for index, name in enumerate(planned_path):
-                if index == 0:
+                if index == 0 and not include_start_target:
                     continue
                 if name in target_set and name not in seen:
                     sequence.append(spec_by_name.get(name, {"name": name, "stop_required": True, "photo_required": True}))
@@ -312,7 +438,31 @@ class SubstationNlpCommanderV2:
             for name in valid_targets
         ]
 
-    def _assign_execution_flags(self, planned_path: list, target_sequence: list) -> tuple:
+    def _should_include_start_target(
+        self,
+        planned_path: list,
+        target_devices: list,
+        task_type: str,
+        target_specs: list = None,
+    ) -> bool:
+        if not planned_path or not target_devices:
+            return False
+        if task_type not in {"single_target", "area_inspection", "full_inspection", "custom_path"}:
+            return False
+        start_name = planned_path[0]
+        if start_name not in set(target_devices):
+            return False
+        for spec in target_specs or []:
+            if isinstance(spec, dict) and spec.get("name") == start_name:
+                return bool(spec.get("stop_required", True)) and bool(spec.get("photo_required", True))
+        return True
+
+    def _assign_execution_flags(
+        self,
+        planned_path: list,
+        target_sequence: list,
+        include_start_target: bool = False,
+    ) -> tuple:
         """为全局 Waypoint 序列生成停留和拍照标志。"""
         if not planned_path:
             return [], []
@@ -321,7 +471,7 @@ class SubstationNlpCommanderV2:
         photo_flags = [False] * len(planned_path)
         next_target_index = 0
         for index, waypoint_name in enumerate(planned_path):
-            if index == 0:
+            if index == 0 and not include_start_target:
                 continue
             if next_target_index >= len(target_sequence):
                 break
@@ -384,7 +534,7 @@ class SubstationNlpCommanderV2:
         rospy.loginfo(f"分析任务: 描述='{task_description}', 航点={waypoint_sequence}")
         normalized_task_type = (task_type or "").strip()
 
-        if normalized_task_type in {"return_home", "go_home", "return_to_base", "charge"}:
+        if normalized_task_type in {"return_home", "go_home", "return_to_base", "charge", "go_charge"}:
             return {"type": "single_target", "targets": ["入口点"]}
 
         if normalized_task_type in {"single_target", "area_inspection", "full_inspection", "custom_path"}:
@@ -487,9 +637,53 @@ class SubstationNlpCommanderV2:
         if not normalized.get("success"):
             return f"❌ {normalized.get('error', 'LLM未返回有效结构化意图')}"
 
+        if normalized.get("is_multi_stage"):
+            return self._start_multi_stage_task(normalized, original_command)
+
+        return self._start_normalized_stage(normalized, original_command)
+
+    def _start_multi_stage_task(self, normalized: dict, original_command: str) -> str:
+        stages = list(normalized.get("stages") or [])
+        if not stages:
+            return "❌ 多阶段任务没有可执行阶段"
+
+        self._pending_task_stages = stages[1:]
+        self._multi_stage_command = original_command
+        self._multi_stage_total = len(stages)
+        result = self._start_normalized_stage(
+            stages[0],
+            original_command,
+            stage_label=f"第1/{self._multi_stage_total}阶段",
+        )
+        if result.startswith("❌"):
+            self._pending_task_stages = []
+            self._multi_stage_command = ""
+            self._multi_stage_total = 0
+            return result
+
+        reasoning = normalized.get("reasoning")
+        if reasoning:
+            result += f"\n🧠 多阶段解析: {reasoning}"
+        return result
+
+    def _start_normalized_stage(self, normalized: dict, original_command: str, stage_label: str = "") -> str:
+        """启动已归一化的单个任务阶段。"""
+        target_specs = normalized["targets"]
+        self._active_task_context = {
+            "command": original_command,
+            "stage": stage_label,
+            "task_type": normalized.get("task_type"),
+            "task_description": normalized.get("task_description"),
+            "targets": [spec.get("name") for spec in target_specs if isinstance(spec, dict)],
+            "execution": normalized.get("execution") or {},
+            "route_policy": normalized.get("route_policy") or {},
+        }
+
+        if hasattr(self, "agent_runtime"):
+            self.agent_runtime.on_user_command(original_command, normalized)
+
         task_type = normalized["task_type"]
         task_description = normalized["task_description"]
-        target_specs = normalized["targets"]
         target_names = [spec["name"] for spec in target_specs]
 
         result = self.handle_navigation_request(
@@ -501,10 +695,33 @@ class SubstationNlpCommanderV2:
             route_policy=normalized["route_policy"],
         )
 
+        if stage_label and not result.startswith("❌"):
+            result = f"🧩 {stage_label}: {task_description}\n" + result
+
         reasoning = normalized.get("reasoning")
         if reasoning:
             result += f"\n🧠 语义解析: {reasoning}"
         return result
+
+    def _start_next_pending_stage(self) -> bool:
+        if not self._pending_task_stages:
+            self._multi_stage_command = ""
+            self._multi_stage_total = 0
+            return False
+
+        stage = self._pending_task_stages.pop(0)
+        stage_index = int(stage.get("stage_index") or (self._multi_stage_total - len(self._pending_task_stages)))
+        result = self._start_normalized_stage(
+            stage,
+            self._multi_stage_command,
+            stage_label=f"第{stage_index}/{self._multi_stage_total}阶段",
+        )
+        self._say(result)
+        if result.startswith("❌"):
+            self._pending_task_stages = []
+            self._multi_stage_command = ""
+            self._multi_stage_total = 0
+        return True
 
     def _extract_target_names(self, target_devices: list) -> list:
         """从LLM返回的target_devices字段中提取按优先级排序的设备名称。"""
@@ -562,6 +779,47 @@ class SubstationNlpCommanderV2:
             print(f"  🎯 当前目标: {status['current_target']}")
         if status['waypoint_queue']:
             print(f"  🛣️ 路径队列: {' → '.join(status['waypoint_queue'])}")
+        if hasattr(self, "agent_runtime"):
+            agent_status = self.agent_runtime.status()
+            print(f"  🧠 Agent Runtime: {'启用' if agent_status.get('enabled') else '关闭'}")
+            last_action = agent_status.get("last_action_result") or {}
+            if last_action:
+                print(f"  🧠 最近动作: {last_action.get('action')} success={last_action.get('success')}")
+
+    def _handle_runtime_event(self, event: dict):
+        if not hasattr(self, "agent_runtime"):
+            return
+        event_type = event.get("event_type", "runtime_event")
+        if event_type == "task_completed" and self._pending_task_stages:
+            self.agent_runtime.observe_event(event)
+            self._start_next_pending_stage()
+            return
+        if not self.agent_runtime.should_handle_event(event):
+            self.agent_runtime.observe_event(event)
+            return
+        self._say(f"🧠 Agent Runtime 处理事件: {event_type}")
+        record = self.agent_runtime.on_runtime_event(event, execute=True)
+        if not record:
+            return
+        run_result = record.get("run_result") or {}
+        action_result = record.get("action_result") or {}
+        decision = run_result.get("decision") or {}
+        validation = run_result.get("validation") or {}
+        tool_trace = run_result.get("tool_trace") or []
+        if decision:
+            self._say(
+                "🧠 Agent 决策: "
+                f"{decision.get('action')} target={decision.get('target')} "
+                f"confidence={decision.get('confidence')} tools={len(tool_trace)}"
+            )
+            if decision.get("reasoning"):
+                self._say(f"🧠 决策依据: {decision.get('reasoning')}")
+        if validation and not validation.get("allowed"):
+            self._say(f"🛡️ 安全校验拒绝: {validation.get('reason')}")
+        if action_result:
+            message = action_result.get("message") or action_result.get("error")
+            if message:
+                self._say(f"🤖 Agent 执行结果: {message}")
     
     def show_graph_info(self):
         """显示图结构信息"""
@@ -649,6 +907,14 @@ class SubstationNlpCommanderV2:
 
             if command == '__EOF__':
                 rospy.loginfo("🔴 stdin 关闭，仅保留 /chat_in 通道")
+                continue
+
+            if source == 'runtime_event':
+                try:
+                    self._handle_runtime_event(command)
+                except Exception as e:
+                    rospy.logerr(f"Agent Runtime 事件处理失败: {e}")
+                    self._say(f"❌ Agent Runtime 事件处理失败: {e}")
                 continue
 
             try:

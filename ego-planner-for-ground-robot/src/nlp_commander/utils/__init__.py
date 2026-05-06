@@ -8,6 +8,7 @@ from .intent_normalizer import IntentNormalizer
 from .llm_utils import LLMClient
 from .path_planner import PathPlanner
 from .runtime_policy import BatteryPolicy, RuntimeEventLog
+from .agent_runtime import TaskAgentRuntime
 
 try:
     from .waypoint_manager import WaypointManager
@@ -26,6 +27,7 @@ __all__ = [
     'PathPlanner',
     'BatteryPolicy',
     'RuntimeEventLog',
+    'TaskAgentRuntime',
     'WaypointManager',
     'SegmentScheduler',
 ] 

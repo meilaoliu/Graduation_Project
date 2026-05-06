@@ -12,12 +12,23 @@
            realistic=false → 加载轻量 system_substation 场景（默认）
    -->
 
-  <arg name="realistic"            default="false"/>
+  <arg name="realistic"            default="true"/>
   <arg name="use_global_traj"      default="true"/>
-  <arg name="initial_battery"      default="100.0"/>
+  <arg name="initial_battery"      default="30.0"/>
   <arg name="low_battery_threshold" default="20.0"/>
   <arg name="dashboard_port"       default="5000"/>
   <arg name="dwell_seconds"        default="3.0"/>
+  <arg name="segment_done_timeout" default="180.0"/>
+  <arg name="enable_progress_monitor" default="true"/>
+  <arg name="progress_monitor_no_progress_timeout_s" default="25.0"/>
+  <arg name="progress_monitor_stuck_timeout_s" default="18.0"/>
+  <arg name="progress_monitor_path_deviation_m" default="8.0"/>
+  <arg name="enable_agent_runtime" default="true"/>
+  <arg name="agent_max_tool_iterations" default="6"/>
+  <arg name="agent_min_tool_calls_before_final" default="2"/>
+  <arg name="agent_min_confidence" default="0.35"/>
+  <arg name="agent_max_retry_per_target" default="1"/>
+  <arg name="agent_max_consecutive_failures" default="3"/>
 
   <!-- 1) Gazebo / 自动驾驶基础设施 -->
   <include unless="$(arg realistic)"
@@ -48,5 +59,17 @@
   <include file="$(find nlp_commander)/launch/nlp_commander.launch">
     <arg name="use_global_traj"        value="$(arg use_global_traj)"/>
     <arg name="dwell_seconds"          value="$(arg dwell_seconds)"/>
+    <arg name="segment_done_timeout"   value="$(arg segment_done_timeout)"/>
+    <arg name="enable_progress_monitor" value="$(arg enable_progress_monitor)"/>
+    <arg name="progress_monitor_no_progress_timeout_s" value="$(arg progress_monitor_no_progress_timeout_s)"/>
+    <arg name="progress_monitor_stuck_timeout_s" value="$(arg progress_monitor_stuck_timeout_s)"/>
+    <arg name="progress_monitor_path_deviation_m" value="$(arg progress_monitor_path_deviation_m)"/>
+    <arg name="low_battery_threshold"  value="$(arg low_battery_threshold)"/>
+    <arg name="enable_agent_runtime"   value="$(arg enable_agent_runtime)"/>
+    <arg name="agent_max_tool_iterations" value="$(arg agent_max_tool_iterations)"/>
+    <arg name="agent_min_tool_calls_before_final" value="$(arg agent_min_tool_calls_before_final)"/>
+    <arg name="agent_min_confidence" value="$(arg agent_min_confidence)"/>
+    <arg name="agent_max_retry_per_target" value="$(arg agent_max_retry_per_target)"/>
+    <arg name="agent_max_consecutive_failures" value="$(arg agent_max_consecutive_failures)"/>
   </include>
 </launch>

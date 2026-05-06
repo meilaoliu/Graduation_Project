@@ -32,9 +32,18 @@ class BatteryPolicy:
         self.full_range_m = max(float(full_range_m), 1.0)
         self.reserve_m = max(float(reserve_m), 0.0)
 
-    def evaluate(self, battery_pct: float, distance_to_next_m: float, distance_next_to_charge_m: float) -> BatteryDecision:
+    def evaluate(
+        self,
+        battery_pct: float,
+        distance_to_next_m: float,
+        distance_next_to_charge_m: float,
+        available_range_m: float = None,
+    ) -> BatteryDecision:
         pct = min(max(float(battery_pct), 0.0), 100.0)
-        available_range = pct / 100.0 * self.full_range_m
+        if available_range_m is None:
+            available_range = pct / 100.0 * self.full_range_m
+        else:
+            available_range = max(float(available_range_m), 0.0)
         required_range = max(float(distance_to_next_m), 0.0) + max(float(distance_next_to_charge_m), 0.0) + self.reserve_m
         margin = available_range - required_range
         should_charge = margin < 0.0

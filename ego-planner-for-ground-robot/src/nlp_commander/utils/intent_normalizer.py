@@ -13,8 +13,10 @@ class IntentNormalizer:
         "full_inspection",
         "custom_path",
         "return_home",
+        "go_charge",
     }
-    HOME_TASK_TYPES = {"return_home", "go_home", "return_to_base", "charge"}
+    HOME_TASK_TYPES = {"return_home", "go_home", "return_to_base"}
+    CHARGE_TASK_TYPES = {"go_charge", "charge", "return_charge"}
 
     def __init__(self, available_locations: Iterable[str], home_name: str = "入口点"):
         self.available_locations = set(available_locations)
@@ -24,13 +26,23 @@ class IntentNormalizer:
         if not isinstance(parsed, dict):
             return {"success": False, "error": "LLM 输出不是 JSON 对象"}
 
+        stages = self._extract_stage_items(parsed)
+        if stages is not None:
+            return self._normalize_task_plan(parsed, stages, original_command)
+
+        return self._normalize_single(parsed, original_command)
+
+    def _normalize_single(self, parsed: Dict[str, Any], original_command: str = "") -> Dict[str, Any]:
+        if not isinstance(parsed, dict):
+            return {"success": False, "error": "LLM 阶段输出不是 JSON 对象"}
+
         task_type = self._normalize_task_type(parsed.get("task_type"))
         targets = self._normalize_targets(parsed)
         execution = self._normalize_execution(parsed, original_command)
         route_policy = self._normalize_route_policy(parsed, task_type)
 
-        if task_type in self.HOME_TASK_TYPES:
-            task_type = "single_target"
+        if task_type in self.HOME_TASK_TYPES or task_type in self.CHARGE_TASK_TYPES:
+            task_type = "go_charge" if task_type in self.CHARGE_TASK_TYPES else "single_target"
             targets = [self._target_spec(self.home_name, priority=1, stop_required=True, photo_required=False)]
 
         if task_type != "full_inspection" and not targets:
@@ -50,9 +62,47 @@ class IntentNormalizer:
             "raw": parsed,
         }
 
+    def _extract_stage_items(self, parsed: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        task_plan = parsed.get("task_plan")
+        if isinstance(task_plan, dict) and isinstance(task_plan.get("stages"), list):
+            return task_plan.get("stages")
+        if isinstance(parsed.get("stages"), list):
+            return parsed.get("stages")
+        return None
+
+    def _normalize_task_plan(
+        self,
+        parsed: Dict[str, Any],
+        stage_items: List[Dict[str, Any]],
+        original_command: str,
+    ) -> Dict[str, Any]:
+        normalized_stages = []
+        for index, stage in enumerate(stage_items):
+            normalized = self._normalize_single(stage, original_command)
+            if not normalized.get("success"):
+                return {
+                    "success": False,
+                    "error": f"第{index + 1}阶段无效: {normalized.get('error', '未知错误')}",
+                }
+            normalized["stage_id"] = str(stage.get("stage_id") or f"stage_{index + 1}")
+            normalized["stage_index"] = index + 1
+            normalized_stages.append(normalized)
+
+        if not normalized_stages:
+            return {"success": False, "error": "多阶段任务没有可执行阶段"}
+
+        return {
+            "success": True,
+            "is_multi_stage": True,
+            "task_description": parsed.get("task_description") or original_command,
+            "reasoning": parsed.get("reasoning", ""),
+            "stages": normalized_stages,
+            "raw": parsed,
+        }
+
     def _normalize_task_type(self, value: Any) -> str:
         task_type = str(value or "custom_path").strip()
-        if task_type in self.HOME_TASK_TYPES:
+        if task_type in self.HOME_TASK_TYPES or task_type in self.CHARGE_TASK_TYPES:
             return task_type
         return task_type if task_type in self.TASK_TYPES else "custom_path"
 

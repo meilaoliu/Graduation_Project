@@ -96,9 +96,8 @@ class PathPlanner:
         """
         规划到多个目标的路径。
 
-        对无显式顺序的目标集合，采用论文中描述的基于 Dijkstra 最短路代价的
-        贪心策略：每一步选择从当前位置出发代价最小的尚未访问目标，并将相邻
-        目标之间的最短路径拼接成全局 Waypoint 序列。
+        对无显式顺序的目标集合，先按变电站区域成组，再在区域内部选择合理
+        入口和连续访问顺序，避免同一区域目标被最近邻贪心拆散。
         
         Args:
             current_pos: 当前位置名称
@@ -113,6 +112,10 @@ class PathPlanner:
 
         if len(valid_targets) == 1:
             return self.plan_path_to_single_target(current_pos, valid_targets[0])
+
+        region_ordered_targets = self._order_targets_by_region(current_pos, valid_targets)
+        if region_ordered_targets:
+            return self.plan_ordered_targets_path(current_pos, region_ordered_targets)
 
         remaining = valid_targets[:]
         final_path = []
@@ -141,6 +144,33 @@ class PathPlanner:
             remaining.remove(best_target)
 
         return final_path
+
+    def _order_targets_by_region(self, current_pos: str, targets: List[str]) -> List[str]:
+        """按区域成组生成访问顺序，区域内部保持连续巡检。"""
+        grouped_targets = self._group_targets_by_region(targets)
+        if not grouped_targets:
+            return []
+
+        ordered_regions = self._plan_region_visit_order(current_pos, grouped_targets)
+        ordered_targets: List[str] = []
+        current_location = current_pos
+
+        for region_name in ordered_regions:
+            region_targets = grouped_targets.get(region_name, [])
+            if not region_targets:
+                continue
+            region_sequence = self._order_region_targets_from(current_location, region_targets)
+            ordered_targets.extend(region_sequence)
+            current_location = region_sequence[-1]
+
+        return ordered_targets
+
+    def _order_region_targets_from(self, current_pos: str, region_targets: List[str]) -> List[str]:
+        sorted_targets = self._sort_targets_by_logical_order(region_targets)
+        if len(sorted_targets) <= 1:
+            return sorted_targets
+        entry_target = self._find_closest_target(current_pos, sorted_targets)
+        return self._solve_region_tsp_optimized(entry_target, sorted_targets)
 
     def plan_ordered_targets_path(
         self,
@@ -334,8 +364,11 @@ class PathPlanner:
                 return sorted_targets[::-1]
             else:
                 # 如果在中间，需要考虑最优遍历策略
-                # 先访问当前位置到序列末尾，再访问开头到当前位置之前
-                return sorted_targets[start_index:] + sorted_targets[:start_index]
+                forward_path = sorted_targets[start_index:] + sorted_targets[:start_index]
+                backward_path = sorted_targets[start_index::-1] + sorted_targets[-1:start_index:-1]
+                if self._target_sequence_distance(backward_path) < self._target_sequence_distance(forward_path):
+                    return backward_path
+                return forward_path
         else:
             # 入口点不在目标中，需要先到达最近的目标，然后访问所有目标
             closest_target = self._find_closest_target(region_entry, sorted_targets)
@@ -352,7 +385,11 @@ class PathPlanner:
                 elif start_index == len(sorted_targets) - 1:
                     return sorted_targets[::-1]
                 else:
-                    return sorted_targets[start_index:] + sorted_targets[:start_index]
+                    forward_path = sorted_targets[start_index:] + sorted_targets[:start_index]
+                    backward_path = sorted_targets[start_index::-1] + sorted_targets[-1:start_index:-1]
+                    if self._target_sequence_distance(backward_path) < self._target_sequence_distance(forward_path):
+                        return backward_path
+                    return forward_path
             else:
                 # 不同区域，需要完整路径
                 path_to_region = self.plan_path_to_single_target(region_entry, closest_target)
@@ -364,7 +401,12 @@ class PathPlanner:
                 elif start_index == len(sorted_targets) - 1:
                     region_path = sorted_targets[::-1]
                 else:
-                    region_path = sorted_targets[start_index:] + sorted_targets[:start_index]
+                    forward_path = sorted_targets[start_index:] + sorted_targets[:start_index]
+                    backward_path = sorted_targets[start_index::-1] + sorted_targets[-1:start_index:-1]
+                    if self._target_sequence_distance(backward_path) < self._target_sequence_distance(forward_path):
+                        region_path = backward_path
+                    else:
+                        region_path = forward_path
                 
                 # 合并路径，避免重复入口点
                 if path_to_region and region_path:
@@ -377,7 +419,7 @@ class PathPlanner:
                     return path_to_region or region_path
     
     def _find_closest_target(self, start: str, targets: List[str]) -> str:
-        """找到距离起点最近的目标"""
+        """找到拓扑路径距离起点最近的目标。"""
         if not targets:
             return start
         
@@ -386,12 +428,22 @@ class PathPlanner:
         
         for target in targets:
             if start in self.graph.locations and target in self.graph.locations:
-                distance = self.graph.euclidean_distance(start, target)
+                route = self.plan_path_to_single_target(start, target)
+                distance = self.get_path_distance(route) if route else float('inf')
                 if distance < min_distance:
                     min_distance = distance
                     closest = target
         
         return closest
+
+    def _target_sequence_distance(self, targets: List[str]) -> float:
+        total = 0.0
+        for index in range(len(targets) - 1):
+            route = self.plan_path_to_single_target(targets[index], targets[index + 1])
+            if not route:
+                return float('inf')
+            total += self.get_path_distance(route)
+        return total
     
     def _build_region_continuous_path(self, ordered_targets: List[str]) -> List[str]:
         """在区域内构建连续路径，避免重复访问"""

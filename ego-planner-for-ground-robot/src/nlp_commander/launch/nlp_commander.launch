@@ -6,29 +6,69 @@
   <arg name="use_global_traj" default="true"/>
   <arg name="dwell_seconds"   default="3.0"/>
   <arg name="arrive_tol"      default="0.5"/>
+  <arg name="segment_done_timeout" default="180.0"/>
   <arg name="waypoint_z"      default="0.75"/>
   <arg name="charge_full_threshold" default="95.0"/>
+  <arg name="charge_wait_timeout" default="120.0"/>
+  <arg name="low_battery_threshold" default="20.0"/>
   <arg name="max_repeat_cycles" default="20"/>
   <arg name="time_budget_min_remaining_s" default="30.0"/>
+  <arg name="time_budget_nominal_speed" default="0.8"/>
   <arg name="max_time_budget_cycles" default="20"/>
   <arg name="enable_predictive_charging" default="true"/>
   <arg name="battery_full_range_m" default="300.0"/>
   <arg name="battery_reserve_m" default="15.0"/>
   <arg name="runtime_context_events" default="40"/>
+  <arg name="enable_progress_monitor" default="true"/>
+  <arg name="progress_monitor_sample_interval_s" default="1.0"/>
+  <arg name="progress_monitor_warmup_s" default="8.0"/>
+  <arg name="progress_monitor_no_progress_timeout_s" default="25.0"/>
+  <arg name="progress_monitor_stuck_timeout_s" default="18.0"/>
+  <arg name="progress_monitor_moving_away_timeout_s" default="15.0"/>
+  <arg name="progress_monitor_path_deviation_m" default="8.0"/>
+  <arg name="progress_monitor_path_deviation_timeout_s" default="8.0"/>
+    <arg name="enable_agent_runtime" default="true"/>
+    <arg name="agent_max_tool_iterations" default="6"/>
+    <arg name="agent_min_tool_calls_before_final" default="2"/>
+    <arg name="agent_min_confidence" default="0.35"/>
+    <arg name="agent_max_retry_per_target" default="1"/>
+    <arg name="agent_max_consecutive_failures" default="3"/>
+    <arg name="agent_temperature" default="0.1"/>
+    <arg name="agent_max_tokens" default="2048"/>
 
   <node pkg="nlp_commander" type="substation_nlp_commander_node_v2.py"
         name="substation_nlp_commander_v2" output="screen">
     <param name="use_global_traj"        value="$(arg use_global_traj)"/>
     <param name="dwell_seconds"          value="$(arg dwell_seconds)"/>
     <param name="arrive_tolerance"       value="$(arg arrive_tol)"/>
+    <param name="segment_done_timeout"   value="$(arg segment_done_timeout)"/>
     <param name="waypoint_z"             value="$(arg waypoint_z)"/>
     <param name="charge_full_threshold"  value="$(arg charge_full_threshold)"/>
+    <param name="charge_wait_timeout"    value="$(arg charge_wait_timeout)"/>
+    <param name="low_battery_threshold"  value="$(arg low_battery_threshold)"/>
     <param name="max_repeat_cycles"      value="$(arg max_repeat_cycles)"/>
     <param name="time_budget_min_remaining_s" value="$(arg time_budget_min_remaining_s)"/>
+    <param name="time_budget_nominal_speed" value="$(arg time_budget_nominal_speed)"/>
     <param name="max_time_budget_cycles" value="$(arg max_time_budget_cycles)"/>
     <param name="enable_predictive_charging" value="$(arg enable_predictive_charging)"/>
     <param name="battery_full_range_m"   value="$(arg battery_full_range_m)"/>
     <param name="battery_reserve_m"      value="$(arg battery_reserve_m)"/>
     <param name="runtime_context_events" value="$(arg runtime_context_events)"/>
+    <param name="enable_progress_monitor" value="$(arg enable_progress_monitor)"/>
+    <param name="progress_monitor_sample_interval_s" value="$(arg progress_monitor_sample_interval_s)"/>
+    <param name="progress_monitor_warmup_s" value="$(arg progress_monitor_warmup_s)"/>
+    <param name="progress_monitor_no_progress_timeout_s" value="$(arg progress_monitor_no_progress_timeout_s)"/>
+    <param name="progress_monitor_stuck_timeout_s" value="$(arg progress_monitor_stuck_timeout_s)"/>
+    <param name="progress_monitor_moving_away_timeout_s" value="$(arg progress_monitor_moving_away_timeout_s)"/>
+    <param name="progress_monitor_path_deviation_m" value="$(arg progress_monitor_path_deviation_m)"/>
+    <param name="progress_monitor_path_deviation_timeout_s" value="$(arg progress_monitor_path_deviation_timeout_s)"/>
+      <param name="enable_agent_runtime" value="$(arg enable_agent_runtime)"/>
+      <param name="agent_max_tool_iterations" value="$(arg agent_max_tool_iterations)"/>
+      <param name="agent_min_tool_calls_before_final" value="$(arg agent_min_tool_calls_before_final)"/>
+      <param name="agent_min_confidence" value="$(arg agent_min_confidence)"/>
+      <param name="agent_max_retry_per_target" value="$(arg agent_max_retry_per_target)"/>
+      <param name="agent_max_consecutive_failures" value="$(arg agent_max_consecutive_failures)"/>
+      <param name="agent_temperature" value="$(arg agent_temperature)"/>
+      <param name="agent_max_tokens" value="$(arg agent_max_tokens)"/>
   </node>
 </launch>

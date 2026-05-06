@@ -51,11 +51,16 @@ class BatteryMonitor:
         self.publish_rate_hz = float(rospy.get_param('~publish_rate_hz', 1.0))
         self.odom_topic = rospy.get_param('~odom_topic', '/odom_adjust')
         self.nominal_v = float(rospy.get_param('~nominal_v', 1.0))         # 静止时估算续航的标称速度
+        self.enforce_charge_location = bool(rospy.get_param('~enforce_charge_location', True))
+        self.charge_x = float(rospy.get_param('~charge_x', 9.0))
+        self.charge_y = float(rospy.get_param('~charge_y', 27.0))
+        self.charge_radius = float(rospy.get_param('~charge_radius', 1.0))
 
         self.pct = self.initial_pct
         self.charging = False
         self.last_v = 0.0
         self.last_w = 0.0
+        self.current_xy = None
         self.lock = threading.Lock()
         self.alert_sent = False
 
@@ -80,9 +85,11 @@ class BatteryMonitor:
                       self.pct, self.base_rate, self.k_v, self.k_w, self.photo_cost)
 
     def odom_cb(self, msg: Odometry):
+        p = msg.pose.pose.position
         v = msg.twist.twist.linear
         w = msg.twist.twist.angular
         with self.lock:
+            self.current_xy = (float(p.x), float(p.y))
             self.last_v = math.sqrt(v.x * v.x + v.y * v.y)
             self.last_w = abs(w.z)
 
@@ -144,6 +151,15 @@ class BatteryMonitor:
 
     def handle_charge(self, _req):
         with self.lock:
+            if self.enforce_charge_location:
+                if self.current_xy is None:
+                    return TriggerResponse(success=False, message="charge rejected: odom unavailable")
+                distance = math.hypot(self.current_xy[0] - self.charge_x, self.current_xy[1] - self.charge_y)
+                if distance > self.charge_radius:
+                    return TriggerResponse(
+                        success=False,
+                        message=f"charge rejected: distance to charger {distance:.2f}m > {self.charge_radius:.2f}m",
+                    )
             self.charging = True
         rospy.loginfo("[battery] charging started @ %.1f%%", self.pct)
         return TriggerResponse(success=True, message="charging started")

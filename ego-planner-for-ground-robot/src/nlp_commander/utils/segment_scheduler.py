@@ -22,6 +22,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 
 from .graph_utils import SubstationGraph
+from .progress_monitor import SegmentProgressMonitor
 from .runtime_policy import BatteryPolicy, RuntimeEventLog
 
 # 软依赖：拍照与电量服务可选
@@ -78,10 +79,23 @@ class SegmentScheduler:
             reserve_m=float(rospy.get_param('~battery_reserve_m', 15.0)),
         )
         self.time_budget_min_remaining_s = float(rospy.get_param('~time_budget_min_remaining_s', 30.0))
+        self.time_budget_nominal_speed = max(float(rospy.get_param('~time_budget_nominal_speed', 0.8)), 0.1)
         self.max_time_budget_cycles = int(rospy.get_param('~max_time_budget_cycles', 20))
         self.global_waypoints_topic = rospy.get_param('~global_waypoints_topic', '/global_waypoints')
         self.frame_id = rospy.get_param('~map_frame', 'map')
         self.waypoint_z = float(rospy.get_param('~waypoint_z', 0.75))  # 与 FSM odom_pos_.z 匹配，避免 3D 距离永不收敛
+        self.enable_progress_monitor = bool(rospy.get_param('~enable_progress_monitor', True))
+        self.progress_monitor = SegmentProgressMonitor(
+            enabled=self.enable_progress_monitor,
+            sample_interval_s=float(rospy.get_param('~progress_monitor_sample_interval_s', 1.0)),
+            warmup_s=float(rospy.get_param('~progress_monitor_warmup_s', 8.0)),
+            no_progress_timeout_s=float(rospy.get_param('~progress_monitor_no_progress_timeout_s', 25.0)),
+            stuck_timeout_s=float(rospy.get_param('~progress_monitor_stuck_timeout_s', 18.0)),
+            moving_away_timeout_s=float(rospy.get_param('~progress_monitor_moving_away_timeout_s', 15.0)),
+            path_deviation_m=float(rospy.get_param('~progress_monitor_path_deviation_m', 8.0)),
+            path_deviation_timeout_s=float(rospy.get_param('~progress_monitor_path_deviation_timeout_s', 8.0)),
+            arrive_tolerance_m=self.arrive_tolerance,
+        )
 
         # ROS 接口
         self.gwp_pub = rospy.Publisher(self.global_waypoints_topic, Path,
@@ -104,14 +118,18 @@ class SegmentScheduler:
         self._last_done_seq = -1
         self._task_active = False
         self._abort_flag = False
+        self._abort_reason = ""
         self._low_battery = False
         self._returning_to_charge = False
         self._battery_pct = 100.0
         self._battery_charging = False
+        self._battery_estimated_remaining_distance_m: Optional[float] = None
         self._mission_targets: List[Tuple[str, bool]] = []
+        self._last_reachable_node = "入口点"
         self._task_start_epoch: Optional[float] = None
         self._deadline_epoch: Optional[float] = None
         self._time_budget_cycle_index = 0
+        self._time_budget_target_cursor = 0
         self.event_log = RuntimeEventLog(max_events=int(rospy.get_param('~runtime_context_events', 40)))
 
         self._worker: Optional[threading.Thread] = None
@@ -193,6 +211,7 @@ class SegmentScheduler:
             data['deadline_epoch'] = round(self._deadline_epoch, 3)
             data['remaining_time_s'] = round(self._deadline_epoch - now, 1)
             data['time_budget_cycle'] = self._time_budget_cycle_index
+            data['time_budget_target_cursor'] = self._time_budget_target_cursor
         return data
 
     def _time_budget_data(self) -> Dict[str, Any]:
@@ -213,11 +232,16 @@ class SegmentScheduler:
             if self._task_active:
                 return "❌ 已有任务在执行，先 stop 再下达新任务"
             self._abort_flag = False
+            self._abort_reason = ""
             # 不清 _low_battery：保留 latched 警报，避免低电量下重启任务漏检
             # 改为根据当前实测 pct 重新判断
             self._low_battery = self._battery_pct <= self.low_battery_threshold
             self._returning_to_charge = False
-            self._segments = self._split_into_segments(waypoints, kind='mission')
+            self._segments = self._split_into_segments(
+                waypoints,
+                kind='mission',
+                skip_initial_start=not bool(execution_options.get('include_start_target', False)),
+            )
             if not self._segments:
                 return ("❌ 任务未生成有效段（可能仅含起点/无停留目标）；"
                         "请确认指令包含至少一个目标设备")
@@ -225,6 +249,7 @@ class SegmentScheduler:
             self._task_start_epoch = time.time()
             self._deadline_epoch = self._resolve_deadline_epoch(execution_options)
             self._time_budget_cycle_index = 1 if self._deadline_epoch is not None else 0
+            self._time_budget_target_cursor = 0
             self._task_active = True
             initial_segment_count = len(self._segments)
             self.event_log.clear()
@@ -254,15 +279,62 @@ class SegmentScheduler:
             return f"✅ 任务启动: {task_description}（首轮{initial_segment_count}段，限时动态续巡）"
         return f"✅ 任务启动: {task_description}（共{initial_segment_count}段）"
 
-    def stop_task(self) -> str:
+    def stop_task(self, preserve_pending_mission: bool = False, reason: str = "external_stop") -> str:
         with self._lock:
+            preserved_segments: List[Segment] = []
+            if preserve_pending_mission:
+                if self._current_segment is not None and self._current_segment.kind == 'mission':
+                    preserved_segments.append(self._current_segment)
+                preserved_segments.extend(seg for seg in self._segments if seg.kind == 'mission')
             self._abort_flag = True
-            self._segments = []
+            self._abort_reason = reason or "external_stop"
+            self._segments = preserved_segments if preserve_pending_mission else []
             self._task_active = False
+            self._current_segment = None
         self._segment_done_evt.set()
         # 主动给 FSM 发一个"原地"目标，打断当前正在执行的轨迹
         self._publish_halt_path()
         return "🛑 已请求停止当前任务"
+
+    def start_charge_task(self, start_name: Optional[str] = None, reason: str = "agent_go_charge") -> str:
+        """启动一个独立返航充电任务，用于 Agent 主动 go_charge 动作。"""
+        with self._lock:
+            if self._task_active:
+                return "❌ 已有任务在执行，先 stop 再下达充电任务"
+            has_pending_mission = any(seg.kind == 'mission' for seg in self._segments)
+            self._abort_flag = False
+            self._abort_reason = ""
+            self._current_segment = None
+            self._returning_to_charge = False
+            if not has_pending_mission:
+                self._segments = []
+                self._mission_targets = []
+                self._task_start_epoch = time.time()
+                self._deadline_epoch = None
+                self._time_budget_cycle_index = 0
+                self._time_budget_target_cursor = 0
+            self._task_active = True
+            if not has_pending_mission:
+                self.event_log.clear()
+            self._emit_event(
+                "task_started",
+                "Agent 主动返航充电" if not has_pending_mission else "Agent 继续返航充电并保留剩余任务",
+                task_type="go_charge",
+                reason=reason,
+                resume_pending_mission=has_pending_mission,
+                **self._time_budget_data_unlocked(),
+            )
+
+        self._inject_return_charge_segment(start_name=start_name, reason=reason)
+        with self._lock:
+            if not self._segments:
+                self._task_active = False
+                return "❌ 无法生成返航充电段"
+
+        self._worker = threading.Thread(
+            target=self._run_loop, name='segment_scheduler_charge', daemon=True)
+        self._worker.start()
+        return "🔋 已启动返航充电任务"
 
     def _publish_halt_path(self):
         """发布一条单点 Path 指向当前 odom 位置，让 FSM 把目标切到原地。"""
@@ -302,6 +374,8 @@ class SegmentScheduler:
                 "current_segment": cur.end_name if cur else None,
                 "current_segment_kind": cur.kind if cur else None,
                 "remaining_segments": len(self._segments),
+                "remaining_targets": self._remaining_mission_targets_unlocked(),
+                "last_reachable_node": self._last_reachable_node,
                 "low_battery": self._low_battery,
                 "returning_to_charge": self._returning_to_charge,
                 "battery_pct": self._battery_pct,
@@ -311,7 +385,7 @@ class SegmentScheduler:
 
     # ------------------------ 段拆分 ------------------------
     @staticmethod
-    def _split_into_segments(waypoints, kind='mission') -> List[Segment]:
+    def _split_into_segments(waypoints, kind='mission', skip_initial_start: bool = True) -> List[Segment]:
         """把 waypoints 按 stop_required=True 切段。每段终点必为停留点。
         起点（首个 stop）只跳过一次，避免连续 stop 时丢段。"""
         segs: List[Segment] = []
@@ -331,7 +405,7 @@ class SegmentScheduler:
             buf.append(Waypoint(name, x, y, stop, photo))
             if stop:
                 # 仅跳过第一次出现的"单一起点段"
-                if (not skipped_initial_start) and len(buf) == 1 and not segs:
+                if skip_initial_start and (not skipped_initial_start) and len(buf) == 1 and not segs:
                     skipped_initial_start = True
                     buf = []
                     continue
@@ -356,9 +430,25 @@ class SegmentScheduler:
             ))
         return segs
 
+    def _remaining_mission_targets_unlocked(self) -> List[str]:
+        return [seg.end_name for seg in self._segments if seg.kind == 'mission']
+
+    def _event_context_unlocked(self) -> Dict[str, Any]:
+        return {
+            "remaining_targets": self._remaining_mission_targets_unlocked(),
+            "last_reachable_node": self._last_reachable_node,
+            "battery_pct": round(self._battery_pct, 1),
+            "estimated_remaining_distance_m": (
+                round(self._battery_estimated_remaining_distance_m, 1)
+                if self._battery_estimated_remaining_distance_m is not None else None
+            ),
+            "time_budget": self._time_budget_data_unlocked(),
+        }
+
     # ------------------------ 主循环 ------------------------
     def _run_loop(self):
         try:
+            failed = False
             while not rospy.is_shutdown():
                 self._maybe_preempt_for_energy()
                 with self._lock:
@@ -394,24 +484,40 @@ class SegmentScheduler:
                     f"开始执行到 {seg.end_name}",
                     segment_id=seg.index,
                     kind=seg.kind,
+                    target=seg.end_name,
                     **self._time_budget_data(),
                 )
                 ok = self._execute_segment(seg)
                 if not ok:
+                    with self._lock:
+                        aborted = self._abort_flag
+                    if aborted:
+                        break
+                    self._publish_halt_path()
                     self.say(f"❌ 段 #{seg.index} 执行失败/超时；任务终止")
+                    with self._lock:
+                        failed_context = self._event_context_unlocked()
                     self._emit_event(
                         "segment_failed",
                         f"到 {seg.end_name} 的段执行失败或超时",
                         segment_id=seg.index,
                         kind=seg.kind,
+                        failed_target=seg.end_name,
+                        **failed_context,
                         **self._time_budget_data(),
                     )
+                    failed = True
                     break
+                with self._lock:
+                    self._last_reachable_node = seg.end_name
+                    finished_context = self._event_context_unlocked()
                 self._emit_event(
                     "segment_finished",
                     f"已到达 {seg.end_name}",
                     segment_id=seg.index,
                     kind=seg.kind,
+                    end_name=seg.end_name,
+                    **finished_context,
                     **self._time_budget_data(),
                 )
 
@@ -426,6 +532,16 @@ class SegmentScheduler:
                         with self._lock:
                             self._segments = []
                         break
+                    with self._lock:
+                        charge_context = self._event_context_unlocked()
+                    self._emit_event(
+                        "charge_completed",
+                        "充电完成，准备恢复剩余任务",
+                        charge_point=seg.end_name,
+                        **charge_context,
+                    )
+                    if self._finish_time_budget_after_charge_if_needed():
+                        continue
                     self._repair_next_mission_after_charge(seg.end_name)
 
                 # 低电量插队（仅 mission 段后才检查）
@@ -439,16 +555,19 @@ class SegmentScheduler:
                     self._inject_return_charge_segment(reason="battery_below_threshold")
 
             with self._lock:
-                done = not self._segments and not self._abort_flag
+                done = not self._segments and not self._abort_flag and not failed
+                abort_reason = self._abort_reason
                 self._task_active = False
                 self._current_segment = None
+                if done or self._abort_flag:
+                    self._abort_reason = ""
 
             if done:
                 self.say("🎉 全部段执行完毕，任务完成。")
                 self._emit_event("task_completed", "全部段执行完毕")
             elif self._abort_flag:
                 self.say("🛑 任务被外部停止。")
-                self._emit_event("task_aborted", "任务被外部停止")
+                self._emit_event("task_aborted", "任务被外部停止", reason=abort_reason or "external_stop")
         except Exception as e:
             rospy.logerr(f"[scheduler] 异常退出: {e}")
             with self._lock:
@@ -467,11 +586,20 @@ class SegmentScheduler:
             target_specs = list(self._mission_targets)
 
         if remaining_time_s <= self.time_budget_min_remaining_s:
+            self.say(
+                f"⏱️ 限时巡检剩余约{remaining_time_s / 60.0:.1f}分钟，"
+                f"低于保留余量{self.time_budget_min_remaining_s:.0f}秒，不再追加。"
+            )
             self._emit_event(
                 "time_budget_finished",
                 "剩余时间不足，不再追加下一轮巡检",
                 remaining_time_s=round(remaining_time_s, 1),
                 completed_cycles=cycle_index,
+            )
+            self._emit_time_budget_decision_required(
+                remaining_time_s,
+                0.0,
+                "remaining_below_minimum",
             )
             return False
 
@@ -485,35 +613,152 @@ class SegmentScheduler:
             return False
 
         start_name = self._current_graph_node_name()
-        next_segments = self._build_cycle_segments(start_name, target_specs)
+        ordered_specs = self._order_time_budget_target_specs(start_name, target_specs)
+        next_segments = self._build_cycle_segments(start_name, ordered_specs)
         if not next_segments:
             self._emit_event(
                 "time_budget_extend_failed",
                 "无法为下一轮限时巡检生成拓扑路径",
                 start_name=start_name,
             )
+            self._emit_time_budget_decision_required(
+                remaining_time_s,
+                0.0,
+                "extend_failed",
+            )
             return False
+
+        estimated_cycle_s = self._estimate_segments_seconds(next_segments, start_name=start_name)
+        selected_segments = next_segments
+        selected_count = len(next_segments)
+        partial_cycle = False
+        if remaining_time_s < estimated_cycle_s + self.time_budget_min_remaining_s:
+            selected_segments = self._select_time_budget_prefix(next_segments, remaining_time_s, start_name)
+            selected_count = len(selected_segments)
+            partial_cycle = selected_count < len(next_segments)
+            if not selected_segments:
+                self.say(
+                    f"⏱️ 限时巡检剩余约{remaining_time_s / 60.0:.1f}分钟，"
+                    f"下一段预计约{estimated_cycle_s / 60.0:.1f}分钟，不再追加。"
+                )
+                self._emit_event(
+                    "time_budget_finished",
+                    "剩余时间不足以完成下一段巡检，不再追加",
+                    remaining_time_s=round(remaining_time_s, 1),
+                    estimated_cycle_s=round(estimated_cycle_s, 1),
+                    completed_cycles=cycle_index,
+                )
+                self._emit_time_budget_decision_required(
+                    remaining_time_s,
+                    estimated_cycle_s,
+                    "insufficient_for_next_segment",
+                )
+                return False
+            estimated_cycle_s = self._estimate_segments_seconds(selected_segments, start_name=start_name)
 
         with self._lock:
             if self._abort_flag or self._segments:
                 return False
-            self._segments = next_segments
+            self._segments = selected_segments
             self._time_budget_cycle_index += 1
             new_cycle_index = self._time_budget_cycle_index
+            self._time_budget_target_cursor = 0
 
+        segment_names = " | ".join(seg.end_name for seg in selected_segments)
         self.say(
             f"⏱️ 限时巡检剩余约{remaining_time_s / 60.0:.1f}分钟，"
-            f"开始第{new_cycle_index}轮动态续巡。"
+            f"开始第{new_cycle_index}轮动态续巡（追加{selected_count}段: {segment_names}，"
+            f"预计约{estimated_cycle_s / 60.0:.1f}分钟）。"
         )
         self._emit_event(
             "time_budget_cycle_started",
             "根据剩余时间动态追加一轮巡检",
             cycle=new_cycle_index,
             start_name=start_name,
-            segment_count=len(next_segments),
+            segment_count=len(selected_segments),
+            partial_cycle=partial_cycle,
+            next_target_cursor=self._time_budget_target_cursor,
             remaining_time_s=round(remaining_time_s, 1),
+            estimated_cycle_s=round(estimated_cycle_s, 1),
         )
         return True
+
+    def _select_time_budget_prefix(
+        self,
+        segments: List[Segment],
+        remaining_time_s: float,
+        start_name: Optional[str] = None,
+    ) -> List[Segment]:
+        selected: List[Segment] = []
+        for seg in segments:
+            candidate = selected + [seg]
+            estimated_s = self._estimate_segments_seconds(candidate, start_name=start_name)
+            if estimated_s + self.time_budget_min_remaining_s <= remaining_time_s:
+                selected.append(seg)
+            else:
+                break
+        return selected
+
+    def _order_time_budget_target_specs(
+        self,
+        start_name: str,
+        target_specs: List[Tuple[str, bool]],
+    ) -> List[Tuple[str, bool]]:
+        remaining = [spec for spec in target_specs if spec[0] in self.graph.locations and spec[0] != start_name]
+        ordered: List[Tuple[str, bool]] = []
+        current_name = start_name
+
+        while remaining:
+            best_index = 0
+            best_distance = float('inf')
+            for index, (target_name, _) in enumerate(remaining):
+                route = self._plan_topology_route_to(target_name, start_name=current_name)
+                distance = self._route_distance(route) if route else float('inf')
+                if distance < best_distance:
+                    best_index = index
+                    best_distance = distance
+            target_spec = remaining.pop(best_index)
+            ordered.append(target_spec)
+            current_name = target_spec[0]
+
+        return ordered
+
+    def _emit_time_budget_decision_required(
+        self,
+        remaining_time_s: float,
+        estimated_cycle_s: float,
+        reason: str,
+    ):
+        with self._lock:
+            context = self._event_context_unlocked()
+        self._emit_event(
+            "decision_required",
+            "限时任务到达续巡决策点",
+            reason=reason,
+            remaining_time_s=round(remaining_time_s, 1),
+            estimated_cycle_s=round(estimated_cycle_s, 1),
+            recommended_actions=["continue", "return_home", "ask_user", "abort"],
+            **context,
+        )
+
+    def _estimate_segments_seconds(self, segments: List[Segment], start_name: Optional[str] = None) -> float:
+        total_distance = 0.0
+        current_name = start_name
+        if current_name is not None:
+            for seg in segments:
+                route = self._plan_topology_route_to(seg.end_name, start_name=current_name)
+                total_distance += self._route_distance(route)
+                current_name = seg.end_name
+        else:
+            for seg in segments:
+                points = [(wp.x, wp.y) for wp in seg.waypoints]
+                for index in range(len(points) - 1):
+                    total_distance += math.hypot(
+                        points[index][0] - points[index + 1][0],
+                        points[index][1] - points[index + 1][1],
+                    )
+        stop_count = sum(1 for seg in segments if seg.kind == 'mission')
+        return total_distance / self.time_budget_nominal_speed + stop_count * self.dwell_seconds
 
     def _build_cycle_segments(self, start_name: str, target_specs: List[Tuple[str, bool]]) -> List[Segment]:
         segments: List[Segment] = []
@@ -565,8 +810,23 @@ class SegmentScheduler:
         rospy.loginfo(f"[scheduler] published /global_waypoints seg#{seg.index} "
                       f"with {len(path.poses)} pts → {seg.end_name}")
 
+        route_points = [(wp.x, wp.y) for wp in seg.waypoints]
+        start_xy = self.get_current_xy() or self._cur_xy_from_odom
+        if start_xy is not None:
+            if not route_points or math.hypot(start_xy[0] - route_points[0][0], start_xy[1] - route_points[0][1]) > 0.2:
+                route_points = [(start_xy[0], start_xy[1])] + route_points
+
+        self.progress_monitor.start(
+            segment_id=seg.index,
+            target=seg.end_name,
+            route_points=route_points,
+            end_xy=seg.end_xy,
+            now_s=time.time(),
+        )
+
         deadline = rospy.Time.now() + rospy.Duration(self.segment_done_timeout)
         rate = rospy.Rate(10)
+        anomaly_reported = False
         # 兜底：odom 容差非常严格 (0.5m，与 FSM 对齐) 且要求速度近零，避免抢跑
         while not rospy.is_shutdown():
             if self._abort_flag:
@@ -582,7 +842,34 @@ class SegmentScheduler:
                 if d < self.arrive_tolerance:
                     rospy.loginfo(f"[scheduler] seg#{seg.index} arrived by odom (d={d:.2f}m)")
                     return True
+                anomaly = self.progress_monitor.update(cur, time.time())
+                if anomaly and not anomaly_reported:
+                    anomaly_reported = True
+                    with self._lock:
+                        context = self._event_context_unlocked()
+                    self._publish_halt_path()
+                    self.say(
+                        f"🛑 检测到 {seg.end_name} 执行进度异常，已先发布原地停止路径。"
+                    )
+                    self._emit_event(
+                        "progress_anomaly",
+                        f"到 {seg.end_name} 的段执行进度异常: {anomaly.get('reason')}",
+                        segment_id=seg.index,
+                        kind=seg.kind,
+                        target=seg.end_name,
+                        failed_target=seg.end_name,
+                        **anomaly,
+                        **context,
+                        **self._time_budget_data(),
+                    )
             if rospy.Time.now() > deadline:
+                if cur is not None and not self.progress_monitor.should_wall_clock_timeout_fail(time.time()):
+                    deadline = rospy.Time.now() + rospy.Duration(self.segment_done_timeout)
+                    rospy.logwarn(
+                        f"[scheduler] seg#{seg.index} reached wall-clock timeout, "
+                        "but odom still shows motion/progress; extend watchdog window"
+                    )
+                    continue
                 rospy.logwarn(f"[scheduler] seg#{seg.index} timeout after "
                               f"{self.segment_done_timeout}s")
                 return False
@@ -622,6 +909,7 @@ class SegmentScheduler:
             if next_seg.kind != 'mission':
                 return
             battery_pct = self._battery_pct
+            estimated_range_m = self._battery_estimated_remaining_distance_m
             low_battery = self._low_battery
             current_segment = self._current_segment
 
@@ -640,11 +928,18 @@ class SegmentScheduler:
         route_next_to_charge = self._plan_topology_route_to(charge_name, start_name=next_seg.end_name)
         distance_to_next = self._route_distance(route_to_next)
         distance_next_to_charge = self._route_distance(route_next_to_charge)
-        decision = self.battery_policy.evaluate(battery_pct, distance_to_next, distance_next_to_charge)
+        decision = self.battery_policy.evaluate(
+            battery_pct,
+            distance_to_next,
+            distance_next_to_charge,
+            available_range_m=estimated_range_m,
+        )
 
         if not decision.should_charge:
             return
 
+        with self._lock:
+            energy_context = self._event_context_unlocked()
         self.say(
             "🔋 预测到达下一目标后剩余续航不足，先返航充电："
             f"可用约{decision.available_range_m:.1f}m，"
@@ -654,10 +949,10 @@ class SegmentScheduler:
             "energy_guard",
             "预测续航不足，先执行充电段",
             next_target=next_seg.end_name,
-            battery_pct=round(battery_pct, 1),
             distance_to_next_m=round(distance_to_next, 1),
             distance_next_to_charge_m=round(distance_next_to_charge, 1),
             margin_m=round(decision.margin_m, 1),
+            **energy_context,
         )
         self._inject_return_charge_segment(start_name=start_name, reason=decision.reason)
 
@@ -698,7 +993,15 @@ class SegmentScheduler:
             self._returning_to_charge = True
         route_text = " → ".join(route) if route else cname
         self.say(f"🔋 低电量触发返航：插入充电段 {route_text}")
-        self._emit_event("return_charge_inserted", f"插入充电段 {route_text}", reason=reason)
+        with self._lock:
+            return_context = self._event_context_unlocked()
+        self._emit_event(
+            "return_charge_inserted",
+            f"插入充电段 {route_text}",
+            reason=reason,
+            route=route,
+            **return_context,
+        )
 
     def _plan_topology_route_to(self, target_name: str, start_name: Optional[str] = None) -> List[str]:
         """用变电站拓扑图规划当前位置到目标点的全局节点序列。"""
@@ -776,6 +1079,32 @@ class SegmentScheduler:
                     self._segments[next_index] = current_seg._replace(waypoints=waypoints)
         self.say(f"🔁 充电后按拓扑恢复任务: {' → '.join(route)}")
 
+    def _finish_time_budget_after_charge_if_needed(self) -> bool:
+        with self._lock:
+            if self._deadline_epoch is None:
+                return False
+            remaining_time_s = self._deadline_epoch - time.time()
+            if remaining_time_s > self.time_budget_min_remaining_s:
+                return False
+            skipped_targets = self._remaining_mission_targets_unlocked()
+            completed_cycles = self._time_budget_cycle_index
+            self._segments = [seg for seg in self._segments if seg.kind != 'mission']
+            self._deadline_epoch = None
+            self._time_budget_target_cursor = 0
+            context = self._event_context_unlocked()
+
+        self.say("⏱️ 充电完成时限时巡检已到时，不再恢复剩余巡检段。")
+        self._emit_event(
+            "time_budget_finished",
+            "充电完成时限时任务已到时，不再恢复剩余巡检段",
+            reason="charge_completed_deadline_expired",
+            remaining_time_s=round(remaining_time_s, 1),
+            completed_cycles=completed_cycles,
+            skipped_targets=skipped_targets,
+            **context,
+        )
+        return True
+
     def _do_charge_cycle(self) -> bool:
         """到达充电点后调用 /charge，等待充满。返回是否成功（达阈值）。"""
         if not HAVE_TRIGGER:
@@ -785,6 +1114,9 @@ class SegmentScheduler:
             rospy.wait_for_service('/charge', timeout=2.0)
             srv = rospy.ServiceProxy('/charge', Trigger)
             resp = srv()
+            if not resp.success:
+                self.say(f"⚠️ /charge 拒绝启动: {resp.message}")
+                return False
             self.say(f"🔌 开始充电: {resp.message}")
         except (rospy.ROSException, rospy.ServiceException) as e:
             self.say(f"⚠️ /charge 调用失败: {e}")
@@ -800,7 +1132,7 @@ class SegmentScheduler:
             if aborted:
                 return False
             if pct >= self.charge_full_threshold and not charging:
-                self.say(f"🔋 充电完成 ({pct:.0f}%)，恢复任务。")
+                self.say(f"🔋 充电完成 ({pct:.0f}%)。")
                 with self._lock:
                     self._low_battery = False
                     self._returning_to_charge = False
@@ -829,8 +1161,9 @@ class SegmentScheduler:
         if bool(msg.data):
             with self._lock:
                 self._low_battery = True
+                context = self._event_context_unlocked()
             rospy.logwarn("[scheduler] /low_battery_alert received → 将于当前段结束后返航")
-            self._emit_event("battery_low", "收到低电量告警", battery_pct=round(self._battery_pct, 1))
+            self._emit_event("battery_low", "收到低电量告警", **context)
 
     def _on_battery(self, msg):
         previous_low = False
@@ -838,9 +1171,15 @@ class SegmentScheduler:
             previous_low = self._battery_pct <= self.low_battery_threshold
             self._battery_pct = float(msg.percentage)
             self._battery_charging = bool(msg.charging)
+            try:
+                estimated_range = float(msg.estimated_remaining_distance_m)
+                self._battery_estimated_remaining_distance_m = estimated_range if estimated_range >= 0.0 else None
+            except (AttributeError, TypeError, ValueError):
+                self._battery_estimated_remaining_distance_m = None
             current_low = self._battery_pct <= self.low_battery_threshold
+            context = self._event_context_unlocked()
         if current_low and not previous_low:
-            self._emit_event("battery_low", "电量低于阈值", battery_pct=round(self._battery_pct, 1))
+            self._emit_event("battery_low", "电量低于阈值", **context)
 
     def _on_odom(self, msg: Odometry):
         p = msg.pose.pose.position
