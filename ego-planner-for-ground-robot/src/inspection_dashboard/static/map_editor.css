@@ -193,4 +193,52 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
   border-radius: var(--r-sm); padding: 5px 10px;
   cursor: pointer; font-size: 11px;
 }
+
+/* ---------- Basemap section ---------- */
+#basemap-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+#basemap-section > summary {
+  cursor: pointer;
+  color: var(--ink-2); font-size: 12px;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 4px 0;
+  user-select: none;
+}
+#basemap-section > summary:hover { color: var(--ink-1); }
+#basemap-section .basemap-body {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 8px;
+}
+#basemap-section label {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; color: var(--ink-3);
+}
+#basemap-section label.row {
+  flex-direction: row; align-items: center; gap: 6px;
+  color: var(--ink-2); font-size: 12px;
+}
+#basemap-section input[type="number"],
+#basemap-section input[type="text"],
+#basemap-section select {
+  background: var(--surface-2); color: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 4px 8px; font-size: 12px;
+  font-family: var(--font-mono);
+}
+#basemap-section input[type="range"] { padding: 0; }
+#basemap-section button {
+  background: var(--surface-2); color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 5px 10px;
+  cursor: pointer; font-size: 11px;
+}
+#basemap-section button.primary {
+  background: var(--accent); color: oklch(20% 0.04 78);
+  border-color: var(--accent);
+}
+#basemap-layer image { pointer-events: auto; }
 #nf-add-tag:hover { background: var(--surface-3); color: var(--ink-1); }

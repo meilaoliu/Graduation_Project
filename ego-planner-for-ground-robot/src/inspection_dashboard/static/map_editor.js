@@ -163,6 +163,8 @@ function fitView() {
 function render() {
   const { w, h } = bbox();
 
+  renderBasemap();
+
   // grid in screen space (decorative; spacing scales with zoom)
   gridLayer.innerHTML = '';
   const stepWorld = 5;
@@ -607,5 +609,232 @@ if (typeof io === 'function') {
     console.warn('socket.io init failed', e);
   }
 }
+
+// ============================================================
+// Basemap (真实俯视图，底层用于对齐拓扑)
+// ============================================================
+const basemapLayer = document.getElementById('basemap-layer');
+const BASEMAP = {
+  enabled: false,
+  source: 'local', src: '',
+  cx: 0, cy: 0, world_width: 100, rotation: 0, opacity: 0.5,
+  // 仅在客户端：图片自然像素尺寸，用于推 height
+  _natW: 0, _natH: 0,
+};
+let basemapDragMode = false;
+let basemapDirty = false;
+
+function basemapImageHref() {
+  if (!BASEMAP.src) return '';
+  return BASEMAP.source === 'url' ? BASEMAP.src : ('/static/basemap/' + BASEMAP.src);
+}
+
+function renderBasemap() {
+  basemapLayer.innerHTML = '';
+  if (!BASEMAP.enabled || !BASEMAP.src) return;
+  if (!BASEMAP._natW || !BASEMAP._natH) return; // 等图加载后再次 render
+
+  const aspect = BASEMAP._natH / BASEMAP._natW;
+  const ww = Number(BASEMAP.world_width) || 100;
+  const wh = ww * aspect;
+  // 中心 (cx,cy)，转屏幕：4 个角通过 w2s 计算后用 image + transform=rotate
+  const [scx, scy] = w2s(Number(BASEMAP.cx) || 0, Number(BASEMAP.cy) || 0);
+  const sw = ww * view.scale;
+  const sh = wh * view.scale;
+  const img = document.createElementNS(SVG_NS, 'image');
+  img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', basemapImageHref());
+  img.setAttribute('href', basemapImageHref());
+  img.setAttribute('x', scx - sw / 2);
+  img.setAttribute('y', scy - sh / 2);
+  img.setAttribute('width', sw);
+  img.setAttribute('height', sh);
+  img.setAttribute('opacity', BASEMAP.opacity);
+  img.setAttribute('preserveAspectRatio', 'none');
+  // 视图旋转 + 用户旋转都加上
+  const totalRot = (Number(BASEMAP.rotation) || 0) + (view.rot % 360);
+  img.setAttribute('transform', `rotate(${totalRot} ${scx} ${scy})`);
+  img.style.cursor = basemapDragMode ? 'move' : 'default';
+  if (basemapDragMode) {
+    img.addEventListener('mousedown', startBasemapDrag);
+  }
+  basemapLayer.appendChild(img);
+}
+
+function loadBasemapNaturalSize() {
+  if (!BASEMAP.src) {
+    BASEMAP._natW = BASEMAP._natH = 0;
+    render();
+    return;
+  }
+  const probe = new Image();
+  probe.onload = () => {
+    BASEMAP._natW = probe.naturalWidth || probe.width || 1;
+    BASEMAP._natH = probe.naturalHeight || probe.height || 1;
+    render();
+  };
+  probe.onerror = () => {
+    BASEMAP._natW = BASEMAP._natH = 0;
+    setStatus('底图加载失败: ' + basemapImageHref(), 'err');
+    render();
+  };
+  probe.src = basemapImageHref();
+}
+
+let _bmDragStart = null;
+function startBasemapDrag(ev) {
+  if (!basemapDragMode) return;
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const [wx0, wy0] = s2w(ev.clientX - svg.getBoundingClientRect().left,
+                         ev.clientY - svg.getBoundingClientRect().top);
+  _bmDragStart = { wx0, wy0, cx0: Number(BASEMAP.cx), cy0: Number(BASEMAP.cy) };
+  window.addEventListener('mousemove', onBasemapDrag);
+  window.addEventListener('mouseup', endBasemapDrag);
+}
+function onBasemapDrag(ev) {
+  if (!_bmDragStart) return;
+  const r = svg.getBoundingClientRect();
+  const [wx, wy] = s2w(ev.clientX - r.left, ev.clientY - r.top);
+  BASEMAP.cx = +(_bmDragStart.cx0 + (wx - _bmDragStart.wx0)).toFixed(3);
+  BASEMAP.cy = +(_bmDragStart.cy0 + (wy - _bmDragStart.wy0)).toFixed(3);
+  $('bm-cx').value = BASEMAP.cx;
+  $('bm-cy').value = BASEMAP.cy;
+  basemapDirty = true;
+  render();
+}
+function endBasemapDrag() {
+  _bmDragStart = null;
+  window.removeEventListener('mousemove', onBasemapDrag);
+  window.removeEventListener('mouseup', endBasemapDrag);
+}
+
+// ---- Basemap UI wiring ----
+async function initBasemapUI() {
+  // 拉文件列表
+  try {
+    const r = await fetch('/api/basemap/list').then((x) => x.json());
+    const sel = $('bm-file');
+    sel.innerHTML = '';
+    (r.files || []).forEach((f) => {
+      const o = document.createElement('option');
+      o.value = f.name; o.textContent = f.name;
+      sel.appendChild(o);
+    });
+  } catch (e) {
+    console.warn('basemap list failed', e);
+  }
+  // 拉持久化配置
+  try {
+    const cfg = await fetch('/api/basemap/config').then((x) => x.json());
+    Object.assign(BASEMAP, cfg);
+    syncBasemapUIFromState();
+    if (BASEMAP.enabled) loadBasemapNaturalSize();
+  } catch (e) {
+    console.warn('basemap config load failed', e);
+  }
+
+  $('bm-enabled').addEventListener('change', (e) => {
+    BASEMAP.enabled = e.target.checked;
+    basemapDirty = true;
+    if (BASEMAP.enabled) loadBasemapNaturalSize();
+    else render();
+  });
+  $('bm-source').addEventListener('change', (e) => {
+    BASEMAP.source = e.target.value;
+    $('bm-local-row').style.display = (BASEMAP.source === 'local') ? '' : 'none';
+    $('bm-url-row').style.display   = (BASEMAP.source === 'url')   ? '' : 'none';
+    BASEMAP.src = (BASEMAP.source === 'local') ? $('bm-file').value : $('bm-url').value;
+    basemapDirty = true;
+    loadBasemapNaturalSize();
+  });
+  $('bm-file').addEventListener('change', (e) => {
+    if (BASEMAP.source !== 'local') return;
+    BASEMAP.src = e.target.value;
+    basemapDirty = true;
+    loadBasemapNaturalSize();
+  });
+  $('bm-url').addEventListener('change', (e) => {
+    if (BASEMAP.source !== 'url') return;
+    BASEMAP.src = e.target.value;
+    basemapDirty = true;
+    loadBasemapNaturalSize();
+  });
+  ['bm-cx', 'bm-cy', 'bm-w', 'bm-rot', 'bm-op'].forEach((id) => {
+    $(id).addEventListener('input', () => {
+      BASEMAP.cx = parseFloat($('bm-cx').value) || 0;
+      BASEMAP.cy = parseFloat($('bm-cy').value) || 0;
+      BASEMAP.world_width = parseFloat($('bm-w').value) || 100;
+      BASEMAP.rotation = parseFloat($('bm-rot').value) || 0;
+      BASEMAP.opacity = parseFloat($('bm-op').value);
+      basemapDirty = true;
+      render();
+    });
+  });
+  $('bm-drag').addEventListener('change', (e) => {
+    basemapDragMode = e.target.checked;
+    render();
+  });
+  $('bm-fit').addEventListener('click', () => {
+    if (!DATA.nodes.length) return;
+    let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    DATA.nodes.forEach((n) => {
+      minx = Math.min(minx, n.x); maxx = Math.max(maxx, n.x);
+      miny = Math.min(miny, n.y); maxy = Math.max(maxy, n.y);
+    });
+    BASEMAP.cx = +((minx + maxx) / 2).toFixed(3);
+    BASEMAP.cy = +((miny + maxy) / 2).toFixed(3);
+    BASEMAP.world_width = +Math.max(maxx - minx, 1).toFixed(3) * 1.2;
+    syncBasemapUIFromState();
+    basemapDirty = true;
+    render();
+  });
+  $('bm-save').addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/basemap/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: BASEMAP.enabled,
+          source: BASEMAP.source,
+          src: BASEMAP.src,
+          cx: BASEMAP.cx,
+          cy: BASEMAP.cy,
+          world_width: BASEMAP.world_width,
+          rotation: BASEMAP.rotation,
+          opacity: BASEMAP.opacity,
+        }),
+      }).then((x) => x.json());
+      if (r.ok) {
+        basemapDirty = false;
+        setStatus('✅ 底图配置已保存', 'ok');
+      } else {
+        setStatus('❌ 保存失败: ' + (r.error || ''), 'err');
+      }
+    } catch (e) {
+      setStatus('❌ 保存失败: ' + e.message, 'err');
+    }
+  });
+}
+
+function syncBasemapUIFromState() {
+  $('bm-enabled').checked = !!BASEMAP.enabled;
+  $('bm-source').value = BASEMAP.source || 'local';
+  $('bm-local-row').style.display = (BASEMAP.source === 'local') ? '' : 'none';
+  $('bm-url-row').style.display   = (BASEMAP.source === 'url')   ? '' : 'none';
+  if (BASEMAP.source === 'local') {
+    if (BASEMAP.src) $('bm-file').value = BASEMAP.src;
+    BASEMAP.src = $('bm-file').value || BASEMAP.src;
+  } else {
+    $('bm-url').value = BASEMAP.src || '';
+  }
+  $('bm-cx').value = BASEMAP.cx;
+  $('bm-cy').value = BASEMAP.cy;
+  $('bm-w').value  = BASEMAP.world_width;
+  $('bm-rot').value = BASEMAP.rotation;
+  $('bm-op').value  = BASEMAP.opacity;
+}
+
+initBasemapUI();
 
 loadMap();

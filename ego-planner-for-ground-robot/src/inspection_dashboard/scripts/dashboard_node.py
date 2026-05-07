@@ -327,6 +327,81 @@ def api_robot_pose():
 
 
 # ---------------------------------------------------------------------------
+# Basemap (overlay 真实俯视图，方便对齐拓扑)
+# ---------------------------------------------------------------------------
+import json as _json
+
+_BASEMAP_DIR = os.path.join(STATIC_DIR, 'basemap')
+_BASEMAP_CFG = os.path.join(_BASEMAP_DIR, '_config.json')
+_BASEMAP_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg')
+
+_BASEMAP_DEFAULT = {
+    'enabled': False,
+    'source': 'local',          # 'local' | 'url'
+    'src': '',                  # 文件名（local）或 URL
+    'cx': 0.0,                  # 世界坐标系下底图中心 x
+    'cy': 0.0,                  # 世界坐标系下底图中心 y
+    'world_width': 100.0,       # 底图宽对应的世界单位（米）
+    'rotation': 0.0,            # 顺时针角度
+    'opacity': 0.5,
+}
+
+
+def _basemap_load_cfg():
+    cfg = dict(_BASEMAP_DEFAULT)
+    try:
+        if os.path.isfile(_BASEMAP_CFG):
+            with open(_BASEMAP_CFG, 'r', encoding='utf-8') as f:
+                user = _json.load(f) or {}
+            cfg.update({k: user[k] for k in cfg.keys() if k in user})
+    except Exception as e:
+        rospy.logwarn(f"[dashboard] basemap config load failed: {e}")
+    return cfg
+
+
+def _basemap_save_cfg(cfg):
+    try:
+        os.makedirs(_BASEMAP_DIR, exist_ok=True)
+        merged = dict(_BASEMAP_DEFAULT)
+        merged.update({k: cfg[k] for k in _BASEMAP_DEFAULT if k in cfg})
+        with open(_BASEMAP_CFG, 'w', encoding='utf-8') as f:
+            _json.dump(merged, f, ensure_ascii=False, indent=2)
+        return merged
+    except Exception as e:
+        raise RuntimeError(f"basemap config save failed: {e}")
+
+
+@app.route('/api/basemap/list', methods=['GET'])
+def api_basemap_list():
+    files = []
+    if os.path.isdir(_BASEMAP_DIR):
+        for name in sorted(os.listdir(_BASEMAP_DIR)):
+            if name.startswith('_'):
+                continue
+            if name.lower().endswith(_BASEMAP_EXTS):
+                files.append({
+                    'name': name,
+                    'url': f'/static/basemap/{name}',
+                })
+    return jsonify({'files': files})
+
+
+@app.route('/api/basemap/config', methods=['GET'])
+def api_basemap_config_get():
+    return jsonify(_basemap_load_cfg())
+
+
+@app.route('/api/basemap/config', methods=['POST'])
+def api_basemap_config_post():
+    body = request.get_json(silent=True) or {}
+    try:
+        merged = _basemap_save_cfg(body)
+        return jsonify({'ok': True, 'config': merged})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # ROS callbacks
 # ---------------------------------------------------------------------------
 _bridge = CvBridge() if HAVE_CV else None
