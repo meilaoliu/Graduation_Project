@@ -12,6 +12,7 @@ import queue
 import threading
 
 from std_msgs.msg import String
+from std_srvs.srv import Trigger, TriggerResponse
 
 # 确保从包目录加载本地 utils 模块
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +49,7 @@ class SubstationNlpCommanderV2:
         self._cmd_queue: "queue.Queue[tuple]" = queue.Queue()
         self._chat_out_pub = rospy.Publisher('/chat_out', String, queue_size=20)
         rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
+        rospy.Service('/reload_map', Trigger, self._handle_reload_map)
         
         # 设置回调函数
         self.waypoint_manager.set_callbacks(
@@ -97,6 +99,24 @@ class SubstationNlpCommanderV2:
             return
         rospy.loginfo(f"[chat_in] {text}")
         self._cmd_queue.put(('chat', text))
+
+    def _handle_reload_map(self, _req):
+        """ROS service: 重新从 OSM 文件加载地图 (供 dashboard 编辑器保存后调用)。"""
+        try:
+            used_osm = self.path_planner.graph.reload()
+            n_nodes = len(self.path_planner.graph.locations)
+            n_edges = len(self.path_planner.graph.osm_edges)
+            self.intent_normalizer = IntentNormalizer(
+                self.path_planner.graph.get_all_locations().keys()
+            )
+            msg = (f"地图已重新加载 (来源={'OSM' if used_osm else '内置'}, "
+                   f"节点={n_nodes}, 边={n_edges})")
+            rospy.loginfo("[reload_map] " + msg)
+            self._say("🗺️ " + msg)
+            return TriggerResponse(success=True, message=msg)
+        except Exception as e:
+            rospy.logerr(f"[reload_map] failed: {e}")
+            return TriggerResponse(success=False, message=str(e))
 
     def _say(self, text: str):
         """同时输出到终端与 /chat_out，供外部 UI 显示。"""

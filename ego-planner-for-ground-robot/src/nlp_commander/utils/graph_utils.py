@@ -39,14 +39,21 @@ class SubstationGraph:
             osm_path: 可选的 OSM 地图路径；若为 None，则尝试使用默认
                      'maps/substation.osm'，若仍失败则使用内置坐标。
         """
-        # 变电站设备坐标
+        self._init_osm_path = osm_path
+        self.reload(osm_path)
+
+    def reload(self, osm_path: Optional[str] = None) -> bool:
+        """从 OSM 文件 (重新) 加载拓扑。返回 True 表示成功用了 OSM。"""
+        if osm_path is not None:
+            self._init_osm_path = osm_path
         self.locations: Dict[str, Tuple[float, float]] = {}
         self.osm_edges: List[Tuple[str, str]] = []
 
-        # 优先尝试从 OSM 文件加载
-        osm_candidate = osm_path or "maps/substation.osm"
+        used_osm = False
+        osm_candidate = self._init_osm_path or "maps/substation.osm"
         try:
             self.locations, self.osm_edges = load_graph_from_osm(osm_candidate)
+            used_osm = True
         except Exception:
             # 回退到内置坐标 (兼容旧版本)
             self.locations = {
@@ -82,6 +89,7 @@ class SubstationGraph:
         
         # 构建邻接表 - 根据变电站物理布局设计连接关系
         self.adjacency_list = self._build_adjacency_list()
+        return used_osm
     
     def _build_adjacency_list(self) -> Dict[str, List[str]]:
         """构建邻接表，基于变电站的物理布局"""

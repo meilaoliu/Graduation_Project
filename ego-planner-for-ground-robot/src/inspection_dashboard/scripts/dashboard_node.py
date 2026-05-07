@@ -238,13 +238,51 @@ def api_map_get():
         return jsonify({'error': str(e)}), 500
 
 
+def _simplified_osm_path(path):
+    """与 substation.osm 同目录的 simplified_substation.osm"""
+    d = os.path.dirname(path)
+    return os.path.join(d, 'simplified_substation.osm')
+
+
+def _write_simplified_osm(path, payload):
+    """从带几何的 osm payload 生成简化版 (无 lat/lon, 无 way)，给 LLM 使用。"""
+    osm = ET.Element('osm', {'version': '0.6', 'generator': 'simplified'})
+    for n in payload.get('nodes', []):
+        e = ET.SubElement(osm, 'node', {'id': str(n['id'])})
+        if n.get('name'):
+            ET.SubElement(e, 'tag', {'k': 'name', 'v': str(n['name'])})
+        for k, v in (n.get('tags') or {}).items():
+            if k == 'name':
+                continue
+            ET.SubElement(e, 'tag', {'k': str(k), 'v': str(v)})
+    rough = ET.tostring(osm, encoding='utf-8')
+    pretty = minidom.parseString(rough).toprettyxml(indent='  ', encoding='utf-8')
+    if os.path.exists(path):
+        bak = path + '.bak.' + _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        shutil.copy2(path, bak)
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(pretty)
+    os.replace(tmp, path)
+
+
+def _call_reload_map_service(timeout=2.0):
+    """尝试调用 nlp_commander 的 /reload_map 服务；返回 (ok, msg)。"""
+    try:
+        rospy.wait_for_service('/reload_map', timeout=timeout)
+        proxy = rospy.ServiceProxy('/reload_map', __import__('std_srvs.srv', fromlist=['Trigger']).Trigger)
+        resp = proxy()
+        return bool(resp.success), str(resp.message)
+    except Exception as e:
+        return False, f'{e}'
+
+
 @app.route('/api/map', methods=['POST'])
 def api_map_post():
     payload = request.get_json(silent=True) or {}
     if 'nodes' not in payload or 'edges' not in payload:
         return jsonify({'error': 'missing nodes/edges'}), 400
     target = payload.get('osm_path') or _osm_path()
-    # 安全：只允许写已存在的目标路径或其同目录
     target = os.path.abspath(target)
     parent = os.path.dirname(target)
     default = os.path.abspath(_osm_path())
@@ -252,9 +290,28 @@ def api_map_post():
         return jsonify({'error': 'osm_path not allowed'}), 403
     try:
         _write_osm_payload(target, payload)
+        # 同步生成简化版 (供 LLM 使用)
+        simp_path = _simplified_osm_path(target)
+        try:
+            _write_simplified_osm(simp_path, payload)
+            simp_ok, simp_msg = True, simp_path
+        except Exception as e:
+            simp_ok, simp_msg = False, f'{e}'
+            rospy.logwarn(f"[dashboard] simplified osm write failed: {e}")
+
+        # 触发 nlp_commander 热加载
+        reload_ok, reload_msg = _call_reload_map_service()
+
         rospy.loginfo(f"[dashboard] osm saved: {target} "
-                      f"(nodes={len(payload['nodes'])}, edges={len(payload['edges'])})")
-        return jsonify({'ok': True, 'path': target})
+                      f"(nodes={len(payload['nodes'])}, edges={len(payload['edges'])}, "
+                      f"simplified={'ok' if simp_ok else 'fail'}, "
+                      f"reload={'ok' if reload_ok else 'fail'})")
+        return jsonify({
+            'ok': True,
+            'path': target,
+            'simplified': {'ok': simp_ok, 'msg': simp_msg},
+            'reload':     {'ok': reload_ok, 'msg': reload_msg},
+        })
     except Exception as e:
         rospy.logerr(f"[dashboard] osm save failed: {e}")
         return jsonify({'error': str(e)}), 500

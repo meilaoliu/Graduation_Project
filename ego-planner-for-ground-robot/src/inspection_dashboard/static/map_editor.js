@@ -7,6 +7,7 @@ const svg = document.getElementById('map-svg');
 const gridLayer = document.getElementById('grid-layer');
 const edgeLayer = document.getElementById('edge-layer');
 const nodeLayer = document.getElementById('node-layer');
+const robotLayer = document.getElementById('robot-layer');
 const statusMsg = document.getElementById('status-msg');
 const osmPathBadge = document.getElementById('osm-path');
 
@@ -126,7 +127,10 @@ async function saveMap() {
   });
   const j = await r.json().catch(() => ({}));
   if (r.ok) {
-    setStatus(`✅ 已保存: ${j.path}`, 'ok');
+    const parts = [`✅ 已保存: ${j.path}`];
+    if (j.simplified) parts.push(j.simplified.ok ? '简化版✓' : '简化版✗');
+    if (j.reload)     parts.push(j.reload.ok ? 'NLP热加载✓' : 'NLP热加载✗(' + (j.reload.msg||'') + ')');
+    setStatus(parts.join(' · '), 'ok');
     dirty = false;
   } else {
     setStatus('保存失败: ' + (j.error || r.status), 'err');
@@ -240,6 +244,7 @@ function render() {
     });
     nodeLayer.appendChild(g);
   });
+  renderRobot();
 }
 
 // ---------- selection ----------
@@ -555,5 +560,52 @@ document.querySelectorAll('#map-toolbar button').forEach((btn) => {
 window.addEventListener('beforeunload', (ev) => {
   if (dirty) { ev.preventDefault(); ev.returnValue = ''; }
 });
+
+// ---------- live robot pose marker ----------
+let robotPose = null;  // {x, y, yaw}
+
+function renderRobot() {
+  robotLayer.innerHTML = '';
+  if (!robotPose) return;
+  const [sx, sy] = w2s(robotPose.x, robotPose.y);
+  // 朝向: world yaw 是世界坐标下绕 z 的弧度。
+  // 屏幕需要考虑视图旋转 (clockwise rot°) 和 y 轴翻转。
+  // 等价做法: 把 (cos, sin) 当成单位向量做 w2s，然后算 atan2 屏幕角。
+  const [hx, hy] = w2s(robotPose.x + Math.cos(robotPose.yaw || 0),
+                       robotPose.y + Math.sin(robotPose.yaw || 0));
+  const screenAngle = Math.atan2(hy - sy, hx - sx) * 180 / Math.PI;
+
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.setAttribute('transform', `translate(${sx},${sy}) rotate(${screenAngle})`);
+  // 三角形 (机头朝向 +x)
+  const tri = document.createElementNS(SVG_NS, 'polygon');
+  tri.setAttribute('points', '12,0 -8,-7 -4,0 -8,7');
+  tri.setAttribute('class', 'robot-marker');
+  g.appendChild(tri);
+  // 中心圆
+  const c = document.createElementNS(SVG_NS, 'circle');
+  c.setAttribute('r', 4);
+  c.setAttribute('class', 'robot-marker');
+  g.appendChild(c);
+  robotLayer.appendChild(g);
+}
+
+if (typeof io === 'function') {
+  try {
+    const sock = io({ transports: ['websocket', 'polling'] });
+    sock.on('state_update', (s) => {
+      if (s && s.position) {
+        robotPose = {
+          x: s.position.x || 0,
+          y: s.position.y || 0,
+          yaw: s.position.yaw || 0,
+        };
+        renderRobot();
+      }
+    });
+  } catch (e) {
+    console.warn('socket.io init failed', e);
+  }
+}
 
 loadMap();

@@ -120,3 +120,25 @@ main {
 }
 .photo-card .label { color: #79c0ff; margin: 4px 0 2px; font-weight: 500; }
 .photo-card .ts { color: #6e7681; font-size: 10px; }
+
+/* nav links / entry button (shared) */
+.nav-links { display: flex; gap: 12px; align-items: center; }
+.nav-links .btn-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #fff !important;
+  background: linear-gradient(180deg, #2f81f7 0%, #1158c7 100%);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 9px 18px;
+  border-radius: 6px;
+  border: 1px solid #58a6ff;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 2px 6px rgba(31,111,235,0.5);
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.nav-links .btn-link:hover {
+  background: linear-gradient(180deg, #58a6ff 0%, #1f6feb 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.2) inset, 0 4px 10px rgba(31,111,235,0.6);
+}

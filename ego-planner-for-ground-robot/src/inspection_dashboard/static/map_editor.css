@@ -1,22 +1,33 @@
 /* nav links shared with index */
-.nav-links { display: flex; gap: 12px; margin-left: 24px; flex: 1; }
+.nav-links { display: flex; gap: 12px; align-items: center; }
 .nav-links .btn-link {
-  color: #fff;
-  background: linear-gradient(180deg, #1f6feb 0%, #1158c7 100%);
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #fff !important;
+  background: linear-gradient(180deg, #2f81f7 0%, #1158c7 100%);
   text-decoration: none;
   font-size: 14px;
   font-weight: 600;
-  padding: 8px 16px;
+  padding: 9px 18px;
   border-radius: 6px;
-  border: 1px solid #388bfd;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset, 0 2px 4px rgba(0,0,0,0.3);
-  transition: all 0.15s;
+  border: 1px solid #58a6ff;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 2px 6px rgba(31,111,235,0.5);
+  transition: all 0.15s ease;
+  white-space: nowrap;
 }
 .nav-links .btn-link:hover {
-  background: linear-gradient(180deg, #388bfd 0%, #1f6feb 100%);
+  background: linear-gradient(180deg, #58a6ff 0%, #1f6feb 100%);
   transform: translateY(-1px);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 4px 8px rgba(0,0,0,0.4);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.2) inset, 0 4px 10px rgba(31,111,235,0.6);
 }
+
+/* Editor page: take full viewport, no body scroll */
+body.editor-page {
+  display: flex; flex-direction: column;
+  height: 100vh; overflow: hidden;
+}
+body.editor-page > header { flex: 0 0 auto; }
+body.editor-page > #map-toolbar { flex: 0 0 auto; }
+body.editor-page > #map-main { flex: 1 1 auto; min-height: 0; }
 
 #map-toolbar {
   display: flex; gap: 8px; align-items: center;
@@ -40,7 +51,7 @@
   display: grid;
   grid-template-columns: 1fr 280px;
   gap: 0;
-  height: calc(100vh - 50px - 49px);
+  /* height managed by body.editor-page flex */
 }
 #canvas-wrap {
   position: relative;
