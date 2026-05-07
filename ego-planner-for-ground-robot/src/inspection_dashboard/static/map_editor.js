@@ -14,8 +14,9 @@ let DATA = { osm_path: '', nodes: [], edges: [] };
 const nodeById = new Map();
 const edgeById = new Map();
 
-// view state: world-to-screen: sx = (wx - cx) * scale + W/2; sy = -(wy - cy) * scale + H/2
-const view = { cx: 0, cy: 0, scale: 8 };
+// view state: world-to-screen with rotation applied first, then translate/scale.
+// rot is clockwise degrees ∈ {0, 90, 180, 270}. Default 90 (matches physical site layout).
+const view = { cx: 0, cy: 0, scale: 8, rot: 90 };
 let dirty = false;
 
 let selectedNode = null;   // node object
@@ -41,10 +42,42 @@ function bbox() {
   const r = svg.getBoundingClientRect();
   return { w: r.width, h: r.height };
 }
-function w2sX(x) { const { w } = bbox(); return (x - view.cx) * view.scale + w / 2; }
-function w2sY(y) { const { h } = bbox(); return -(y - view.cy) * view.scale + h / 2; }
-function s2wX(sx) { const { w } = bbox(); return (sx - w / 2) / view.scale + view.cx; }
-function s2wY(sy) { const { h } = bbox(); return -(sy - h / 2) / view.scale + view.cy; }
+// rotate a world point clockwise by view.rot (cx,cy live in this rotated space)
+function _rot(x, y) {
+  switch (view.rot % 360) {
+    case 0:   return [x, y];
+    case 90:  return [y, -x];
+    case 180: return [-x, -y];
+    case 270: return [-y, x];
+    default:  return [x, y];
+  }
+}
+function _unrot(rx, ry) {
+  switch (view.rot % 360) {
+    case 0:   return [rx, ry];
+    case 90:  return [-ry, rx];
+    case 180: return [-rx, -ry];
+    case 270: return [ry, -rx];
+    default:  return [rx, ry];
+  }
+}
+// world (x, y) -> screen (sx, sy)
+function w2s(x, y) {
+  const { w, h } = bbox();
+  const [rx, ry] = _rot(x, y);
+  return [(rx - view.cx) * view.scale + w / 2,
+          -(ry - view.cy) * view.scale + h / 2];
+}
+// screen -> world
+function s2w(sx, sy) {
+  const { w, h } = bbox();
+  const rx = (sx - w / 2) / view.scale + view.cx;
+  const ry = -(sy - h / 2) / view.scale + view.cy;
+  return _unrot(rx, ry);
+}
+// shorthand for callers that want one axis
+function w2sX(x, y) { return w2s(x, y)[0]; }
+function w2sY(x, y) { return w2s(x, y)[1]; }
 
 // ---------- data load/save ----------
 async function loadMap() {
@@ -65,6 +98,8 @@ async function loadMap() {
   nextEdgeId = Math.max(me + 1, 2000);
 
   rebuildIndex();
+  // 等 SVG 真正有尺寸再 fit (首次加载时 layout 可能还没完成)
+  await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
   fitView();
   render();
   setStatus(`已加载: ${DATA.nodes.length} 节点 / ${DATA.edges.length} 边`, 'ok');
@@ -104,10 +139,12 @@ function fitView() {
     view.cx = 0; view.cy = 0; view.scale = 8;
     return;
   }
+  // bbox in ROTATED space (since cx/cy live there)
   let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
   DATA.nodes.forEach((n) => {
-    minx = Math.min(minx, n.x); maxx = Math.max(maxx, n.x);
-    miny = Math.min(miny, n.y); maxy = Math.max(maxy, n.y);
+    const [rx, ry] = _rot(n.x, n.y);
+    minx = Math.min(minx, rx); maxx = Math.max(maxx, rx);
+    miny = Math.min(miny, ry); maxy = Math.max(maxy, ry);
   });
   const wx = Math.max(1, maxx - minx);
   const wy = Math.max(1, maxy - miny);
@@ -120,29 +157,30 @@ function fitView() {
 
 // ---------- render ----------
 function render() {
-  // grid
-  gridLayer.innerHTML = '';
   const { w, h } = bbox();
-  const step = 5; // world units
-  const x0 = Math.floor(s2wX(0) / step) * step;
-  const x1 = Math.ceil(s2wX(w) / step) * step;
-  const y0 = Math.floor(s2wY(h) / step) * step;
-  const y1 = Math.ceil(s2wY(0) / step) * step;
-  for (let x = x0; x <= x1; x += step) {
-    const sx = w2sX(x);
-    const ln = document.createElementNS(SVG_NS, 'line');
-    ln.setAttribute('x1', sx); ln.setAttribute('x2', sx);
-    ln.setAttribute('y1', 0);  ln.setAttribute('y2', h);
-    ln.setAttribute('class', 'grid-line' + (x % (step * 4) === 0 ? ' major' : ''));
-    gridLayer.appendChild(ln);
-  }
-  for (let y = y0; y <= y1; y += step) {
-    const sy = w2sY(y);
-    const ln = document.createElementNS(SVG_NS, 'line');
-    ln.setAttribute('y1', sy); ln.setAttribute('y2', sy);
-    ln.setAttribute('x1', 0);  ln.setAttribute('x2', w);
-    ln.setAttribute('class', 'grid-line' + (y % (step * 4) === 0 ? ' major' : ''));
-    gridLayer.appendChild(ln);
+
+  // grid in screen space (decorative; spacing scales with zoom)
+  gridLayer.innerHTML = '';
+  const stepWorld = 5;
+  const stepPx = stepWorld * view.scale;
+  if (stepPx > 6) {
+    // align to view center
+    const cxPx = w / 2 - (view.cx % stepWorld) * view.scale;
+    const cyPx = h / 2 + (view.cy % stepWorld) * view.scale;
+    for (let sx = cxPx % stepPx; sx < w; sx += stepPx) {
+      const ln = document.createElementNS(SVG_NS, 'line');
+      ln.setAttribute('x1', sx); ln.setAttribute('x2', sx);
+      ln.setAttribute('y1', 0);  ln.setAttribute('y2', h);
+      ln.setAttribute('class', 'grid-line');
+      gridLayer.appendChild(ln);
+    }
+    for (let sy = cyPx % stepPx; sy < h; sy += stepPx) {
+      const ln = document.createElementNS(SVG_NS, 'line');
+      ln.setAttribute('y1', sy); ln.setAttribute('y2', sy);
+      ln.setAttribute('x1', 0);  ln.setAttribute('x2', w);
+      ln.setAttribute('class', 'grid-line');
+      gridLayer.appendChild(ln);
+    }
   }
 
   // edges
@@ -151,8 +189,8 @@ function render() {
     const a = nodeById.get(String(e.a));
     const b = nodeById.get(String(e.b));
     if (!a || !b) return;
-    const x1 = w2sX(a.x), y1 = w2sY(a.y), x2 = w2sX(b.x), y2 = w2sY(b.y);
-    // hit area (transparent thick line)
+    const [x1, y1] = w2s(a.x, a.y);
+    const [x2, y2] = w2s(b.x, b.y);
     const hit = document.createElementNS(SVG_NS, 'line');
     hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
     hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
@@ -173,7 +211,7 @@ function render() {
     const g = document.createElementNS(SVG_NS, 'g');
     g.setAttribute('class', 'node-group');
     g.setAttribute('data-id', n.id);
-    const cx = w2sX(n.x), cy = w2sY(n.y);
+    const [cx, cy] = w2s(n.x, n.y);
     g.setAttribute('transform', `translate(${cx},${cy})`);
     const c = document.createElementNS(SVG_NS, 'circle');
     let cls = 'node-circle';
@@ -301,15 +339,14 @@ svg.addEventListener('mousemove', (ev) => {
   if (dragging) {
     const r = svg.getBoundingClientRect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
-    dragging.node.x = s2wX(mx);
-    dragging.node.y = s2wY(my);
+    const [wx, wy] = s2w(mx, my);
+    dragging.node.x = wx;
+    dragging.node.y = wy;
     dragging.g.setAttribute('transform', `translate(${mx},${my})`);
-    // 同步刷新该节点上的边
-    edgeLayer.querySelectorAll('line').forEach((ln) => { /* no-op (will redraw on mouseup) */ });
     redrawEdgesOnly();
     if (selectedNode === dragging.node) {
-      $('nf-x').value = dragging.node.x.toFixed(2);
-      $('nf-y').value = dragging.node.y.toFixed(2);
+      $('nf-x').value = wx.toFixed(2);
+      $('nf-y').value = wy.toFixed(2);
     }
     return;
   }
@@ -352,20 +389,22 @@ svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
 svg.addEventListener('wheel', (ev) => {
   ev.preventDefault();
   const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
-  // 以鼠标点为缩放中心
+  // zoom around mouse: do math in rotated space directly
   const r = svg.getBoundingClientRect();
+  const { w, h } = bbox();
   const mx = ev.clientX - r.left, my = ev.clientY - r.top;
-  const wxBefore = s2wX(mx), wyBefore = s2wY(my);
+  const rxBefore = (mx - w / 2) / view.scale + view.cx;
+  const ryBefore = -(my - h / 2) / view.scale + view.cy;
   view.scale *= factor;
   view.scale = Math.max(0.5, Math.min(view.scale, 200));
-  const wxAfter = s2wX(mx), wyAfter = s2wY(my);
-  view.cx += wxBefore - wxAfter;
-  view.cy += wyBefore - wyAfter;
+  const rxAfter = (mx - w / 2) / view.scale + view.cx;
+  const ryAfter = -(my - h / 2) / view.scale + view.cy;
+  view.cx += rxBefore - rxAfter;
+  view.cy += ryBefore - ryAfter;
   render();
 }, { passive: false });
 
 function redrawEdgesOnly() {
-  // lightweight: re-set x,y of all edge lines without rebuilding
   const lines = edgeLayer.querySelectorAll('line');
   let i = 0;
   DATA.edges.forEach((e) => {
@@ -374,7 +413,8 @@ function redrawEdgesOnly() {
     if (!a || !b) return;
     const hit = lines[i++], real = lines[i++];
     if (!hit || !real) return;
-    const x1 = w2sX(a.x), y1 = w2sY(a.y), x2 = w2sX(b.x), y2 = w2sY(b.y);
+    const [x1, y1] = w2s(a.x, a.y);
+    const [x2, y2] = w2s(b.x, b.y);
     hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
     hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
     real.setAttribute('x1', x1); real.setAttribute('y1', y1);
@@ -502,6 +542,10 @@ document.querySelectorAll('#map-toolbar button').forEach((btn) => {
       deleteSelected();
     } else if (act === 'fit') {
       fitView(); render();
+    } else if (act === 'rotate') {
+      view.rot = (view.rot + 90) % 360;
+      fitView(); render();
+      setStatus(`视图旋转: ${view.rot}°`, '');
     } else if (act === 'save') {
       saveMap();
     }
