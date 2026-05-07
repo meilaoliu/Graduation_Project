@@ -498,15 +498,35 @@ def main():
 
     threading.Thread(target=state_pusher, daemon=True).start()
 
+    # 干净关闭：SIGINT/SIGTERM 时同时关 rospy 与 socketio,
+    # 避免在 ROS master 里留下 stale 订阅，导致重启后接不到消息。
+    import signal as _signal
+    _shutting_down = {'flag': False}
+    def _graceful(signum, _frame):
+        if _shutting_down['flag']:
+            return
+        _shutting_down['flag'] = True
+        rospy.loginfo(f"[dashboard] signal {signum} → shutting down (rospy + socketio)")
+        try:
+            rospy.signal_shutdown(f'signal {signum}')
+        except Exception:
+            pass
+        try:
+            socketio.stop()
+        except Exception:
+            pass
+    _signal.signal(_signal.SIGINT, _graceful)
+    _signal.signal(_signal.SIGTERM, _graceful)
+
     rospy.loginfo(f"[dashboard] Serving on http://{host}:{port}  (odom={odom_topic}, image={image_topic})")
     try:
         socketio.run(app, host=host, port=port, debug=False,
                      use_reloader=False, allow_unsafe_werkzeug=True)
     except TypeError:
-        # 老版 flask-socketio 不认识 allow_unsafe_werkzeug 参数
         socketio.run(app, host=host, port=port, debug=False, use_reloader=False)
     finally:
-        rospy.signal_shutdown('flask exited')
+        if not rospy.is_shutdown():
+            rospy.signal_shutdown('flask exited')
 
 
 if __name__ == '__main__':
