@@ -2,64 +2,111 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>变电站巡检仪表盘</title>
+<title>变电站巡检 · 操作台</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 <body>
 <header>
-  <h1>🤖 变电站智能巡检仪表盘</h1>
+  <h1>变电站巡检 · 操作台</h1>
+  <span class="meta" id="header-meta">— · —</span>
   <nav class="nav-links">
-    <a href="/map" class="btn-link">🗺️ 打开地图编辑器</a>
+    <a href="/map" class="btn-link">地图编辑器</a>
+    <span id="conn-state" class="badge bad">未连接</span>
   </nav>
-  <span id="conn-state" class="badge bad">未连接</span>
 </header>
 
 <main>
-  <!-- 状态面板 -->
+  <!-- ===== Status strip ====================================================== -->
   <section class="panel" id="status-panel">
-    <h2>机器人状态</h2>
-    <div class="status-grid">
-      <div><label>位置</label><span id="pos">—</span></div>
-      <div><label>朝向</label><span id="yaw">—</span></div>
-      <div><label>线速度</label><span id="vlin">—</span></div>
-      <div><label>角速度</label><span id="vang">—</span></div>
-      <div><label>电量</label>
-        <div class="battery-bar">
-          <div id="battery-fill"></div>
-          <span id="battery-text">—</span>
+    <div class="panel-head">
+      <h2>遥测</h2>
+      <span class="panel-aside" id="task-aside">任务空闲</span>
+    </div>
+    <div class="panel-body">
+      <div class="metric battery">
+        <span class="k">电量</span>
+        <div class="battery-gauge">
+          <div class="battery-cells" id="battery-cells">
+            <!-- 10 cells injected by JS -->
+          </div>
+          <span class="battery-num" id="battery-text">—</span>
         </div>
       </div>
-      <div><label>状态</label><span id="bstatus">—</span></div>
-      <div><label>剩余可走</label><span id="bdist">—</span></div>
+      <div class="metric">
+        <span class="k">状态</span>
+        <span class="v" id="bstatus">—</span>
+      </div>
+      <div class="metric">
+        <span class="k">续航估计</span>
+        <span class="v" id="bdist">—<span class="u"> m</span></span>
+      </div>
+      <div class="metric">
+        <span class="k">位置</span>
+        <span class="v" id="pos">—</span>
+      </div>
+      <div class="metric">
+        <span class="k">朝向</span>
+        <span class="v" id="yaw">—<span class="u">°</span></span>
+      </div>
+      <div class="metric">
+        <span class="k">线速度</span>
+        <span class="v" id="vlin">—<span class="u"> m/s</span></span>
+      </div>
+      <div class="metric">
+        <span class="k">角速度</span>
+        <span class="v" id="vang">—<span class="u"> rad/s</span></span>
+      </div>
     </div>
   </section>
 
-  <!-- 摄像头实时画面 -->
+  <!-- ===== Camera ============================================================ -->
   <section class="panel" id="cam-panel">
-    <h2>实时画面</h2>
-    <div class="cam-wrap">
-      <img id="cam-img" alt="camera feed" />
-      <div id="cam-empty">等待图像...</div>
+    <div class="panel-head">
+      <h2>实时画面</h2>
+      <span class="panel-aside" id="cam-meta">—</span>
+    </div>
+    <div class="panel-body">
+      <div class="cam-wrap">
+        <img id="cam-img" alt="camera feed" />
+        <div id="cam-empty">等待图像 · WAITING</div>
+        <div class="cam-overlay">
+          <span class="live">LIVE</span>
+          <span id="cam-fps">— FPS</span>
+        </div>
+      </div>
     </div>
   </section>
 
-  <!-- 对话框 -->
+  <!-- ===== Chat ============================================================== -->
   <section class="panel" id="chat-panel">
-    <h2>对话框</h2>
-    <div id="chat-log"></div>
-    <form id="chat-form">
-      <input id="chat-input" type="text" autocomplete="off"
-             placeholder="输入指令，例如：前往35kv配电箱2 ..." />
-      <button type="submit">发送</button>
-    </form>
+    <div class="panel-head">
+      <h2>对话</h2>
+      <span class="panel-aside">自然语言指令</span>
+    </div>
+    <div class="panel-body">
+      <div id="chat-log"></div>
+      <form id="chat-form">
+        <input id="chat-input" type="text" autocomplete="off"
+               placeholder="例如：前往 35kV 配电箱 2，或 巡检 SVG 区" />
+        <button type="submit">发送</button>
+      </form>
+    </div>
   </section>
 
-  <!-- 拍照画廊 -->
+  <!-- ===== Photo strip ======================================================= -->
   <section class="panel" id="photo-panel">
-    <h2>拍照记录</h2>
-    <div id="photo-grid"></div>
+    <div class="panel-head">
+      <h2>拍照记录</h2>
+      <span class="panel-aside" id="photo-count">0 张</span>
+    </div>
+    <div class="panel-body">
+      <div id="photo-grid"></div>
+      <div id="photo-empty" style="display:none">尚无拍照</div>
+    </div>
   </section>
 </main>
 

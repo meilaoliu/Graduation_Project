@@ -400,7 +400,8 @@ def camera_cb(msg: Image):
     if not ok:
         return
     b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-    socketio.emit('camera_frame', {'jpeg_b64': b64, 'time': now})
+    h, w = cv_img.shape[:2]
+    socketio.emit('camera_frame', {'jpeg_b64': b64, 'time': now, 'width': int(w), 'height': int(h)})
 
 
 # ---------------------------------------------------------------------------
