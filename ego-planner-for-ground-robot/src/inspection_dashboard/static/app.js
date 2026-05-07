@@ -117,7 +117,7 @@ function refreshPhotoUI() {
   photoCount.textContent = totalPhotos + ' 张';
 }
 refreshPhotoUI();
-sock.on('photo', (ph) => {
+function addPhoto(ph) {
   const card = document.createElement('div');
   card.className = 'photo-card';
   const src = ph.thumb ? ('data:image/jpeg;base64,' + ph.thumb) : '';
@@ -132,4 +132,11 @@ sock.on('photo', (ph) => {
     photoGrid.removeChild(photoGrid.lastChild);
   }
   refreshPhotoUI();
+}
+sock.on('photo', addPhoto);
+sock.on('photo_history', (list) => {
+  // server sends oldest→newest; replay in order so newest ends up first
+  photoGrid.innerHTML = '';
+  totalPhotos = 0;
+  (list || []).forEach(addPhoto);
 });

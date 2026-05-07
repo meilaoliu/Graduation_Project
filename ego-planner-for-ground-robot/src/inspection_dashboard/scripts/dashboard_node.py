@@ -60,7 +60,8 @@ class DashboardState:
             'estimated_remaining_distance_m': 0.0,
         }
         self.last_chat = []          # 仅用于刚连接时的回灌
-        self.last_photo = None       # 最近一次拍照事件
+        self.last_photo = None       # 最近一次拍照事件 (兼容字段, 弃用中)
+        self.photos = []             # 最近 N 次拍照事件，刷新时回灌
         self.connected_clients = 0
 
     def snapshot_state(self):
@@ -378,6 +379,8 @@ def photo_cb(msg):
     }
     with STATE.lock:
         STATE.last_photo = payload
+        STATE.photos.append(payload)
+        STATE.photos[:] = STATE.photos[-50:]
     socketio.emit('photo', payload)
 
 
@@ -415,12 +418,12 @@ def on_connect():
     with STATE.lock:
         STATE.connected_clients += 1
         history = list(STATE.last_chat)
-        last_photo = STATE.last_photo
+        photos = list(STATE.photos)
     socketio.emit('hello', {'ok': True})
     if history:
         socketio.emit('chat_history', history)
-    if last_photo:
-        socketio.emit('photo', last_photo)
+    if photos:
+        socketio.emit('photo_history', photos)
 
 
 @socketio.on('disconnect')
