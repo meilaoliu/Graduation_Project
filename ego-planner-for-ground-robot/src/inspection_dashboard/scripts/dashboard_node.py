@@ -104,6 +104,170 @@ def healthz():
     return 'ok', 200
 
 
+@app.route('/map')
+def map_editor_page():
+    return render_template('map_editor.html')
+
+
+# ---------------------------------------------------------------------------
+# OSM map editor
+# ---------------------------------------------------------------------------
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+from flask import request, jsonify, abort
+import shutil
+import datetime as _dt
+
+
+def _osm_path():
+    """从 rosparam 获取 osm 路径；默认指向 nlp_commander/maps/substation.osm"""
+    p = rospy.get_param('~osm_path', '')
+    if p and os.path.exists(p):
+        return p
+    # 默认相对路径回退
+    try:
+        import rospkg
+        nlp_share = rospkg.RosPack().get_path('nlp_commander')
+        cand = os.path.join(nlp_share, 'maps', 'substation.osm')
+        if os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    # 兜底：源码中常见位置
+    cand = os.path.expanduser(
+        '~/Graduation_Project/ego-planner-for-ground-robot/src/'
+        'nlp_commander/maps/substation.osm')
+    return cand
+
+
+def _parse_osm_to_payload(path):
+    tree = ET.parse(path)
+    root = tree.getroot()
+    nodes, edges = [], []
+    for nd in root.findall('node'):
+        nid = nd.get('id')
+        lat = nd.get('lat')
+        lon = nd.get('lon')
+        tags = {t.get('k'): t.get('v') for t in nd.findall('tag')}
+        try:
+            x = float(lon) if lon is not None else 0.0
+            y = float(lat) if lat is not None else 0.0
+        except ValueError:
+            x, y = 0.0, 0.0
+        nodes.append({
+            'id': str(nid),
+            'name': tags.get('name', f'node_{nid}'),
+            'x': x,
+            'y': y,
+            'tags': {k: v for k, v in tags.items() if k != 'name'},
+        })
+    for w in root.findall('way'):
+        wid = w.get('id')
+        refs = [n.get('ref') for n in w.findall('nd') if n.get('ref')]
+        if len(refs) < 2:
+            continue
+        wtags = {t.get('k'): t.get('v') for t in w.findall('tag')}
+        # 单段 way (本项目约定)：仅取首尾
+        edges.append({
+            'id': str(wid),
+            'a': str(refs[0]),
+            'b': str(refs[-1]),
+            'name': wtags.get('name', ''),
+        })
+    return {'osm_path': path, 'nodes': nodes, 'edges': edges}
+
+
+def _write_osm_payload(path, payload):
+    """把前端传回的 nodes/edges 重新写回 osm 文件 (带备份)。"""
+    nodes = payload.get('nodes', [])
+    edges = payload.get('edges', [])
+
+    # 读原文件以保留 root attrs / 注释 (注释另行注入)
+    try:
+        orig_root = ET.parse(path).getroot()
+        gen = orig_root.get('generator', 'manual')
+    except Exception:
+        gen = 'manual'
+
+    osm = ET.Element('osm', {'version': '0.6', 'generator': gen})
+
+    for n in nodes:
+        attrs = {'id': str(n['id']),
+                 'lat': str(n.get('y', 0.0)),
+                 'lon': str(n.get('x', 0.0))}
+        e = ET.SubElement(osm, 'node', attrs)
+        # name 第一
+        if n.get('name'):
+            ET.SubElement(e, 'tag', {'k': 'name', 'v': str(n['name'])})
+        for k, v in (n.get('tags') or {}).items():
+            if k == 'name':
+                continue
+            ET.SubElement(e, 'tag', {'k': str(k), 'v': str(v)})
+
+    for ed in edges:
+        wattrs = {'id': str(ed['id'])}
+        we = ET.SubElement(osm, 'way', wattrs)
+        ET.SubElement(we, 'nd', {'ref': str(ed['a'])})
+        ET.SubElement(we, 'nd', {'ref': str(ed['b'])})
+        if ed.get('name'):
+            ET.SubElement(we, 'tag', {'k': 'name', 'v': str(ed['name'])})
+
+    # pretty-print
+    rough = ET.tostring(osm, encoding='utf-8')
+    pretty = minidom.parseString(rough).toprettyxml(indent='  ', encoding='utf-8')
+
+    # 备份 + 原子写
+    if os.path.exists(path):
+        bak = path + '.bak.' + _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        shutil.copy2(path, bak)
+    tmp = path + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(pretty)
+    os.replace(tmp, path)
+    return True
+
+
+@app.route('/api/map', methods=['GET'])
+def api_map_get():
+    p = _osm_path()
+    if not os.path.exists(p):
+        return jsonify({'error': f'osm not found: {p}'}), 404
+    try:
+        return jsonify(_parse_osm_to_payload(p))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/map', methods=['POST'])
+def api_map_post():
+    payload = request.get_json(silent=True) or {}
+    if 'nodes' not in payload or 'edges' not in payload:
+        return jsonify({'error': 'missing nodes/edges'}), 400
+    target = payload.get('osm_path') or _osm_path()
+    # 安全：只允许写已存在的目标路径或其同目录
+    target = os.path.abspath(target)
+    parent = os.path.dirname(target)
+    default = os.path.abspath(_osm_path())
+    if not (target == default or parent == os.path.dirname(default)):
+        return jsonify({'error': 'osm_path not allowed'}), 403
+    try:
+        _write_osm_payload(target, payload)
+        rospy.loginfo(f"[dashboard] osm saved: {target} "
+                      f"(nodes={len(payload['nodes'])}, edges={len(payload['edges'])})")
+        return jsonify({'ok': True, 'path': target})
+    except Exception as e:
+        rospy.logerr(f"[dashboard] osm save failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/robot_pose', methods=['GET'])
+def api_robot_pose():
+    snap = STATE.snapshot_state()
+    p = snap['position']
+    # 与 osm 约定一致：x=lon, y=lat
+    return jsonify({'x': p['x'], 'y': p['y'], 'yaw': p['yaw']})
+
+
 # ---------------------------------------------------------------------------
 # ROS callbacks
 # ---------------------------------------------------------------------------

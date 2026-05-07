@@ -1,0 +1,129 @@
+/* nav links shared with index */
+.nav-links { display: flex; gap: 16px; margin-left: 24px; flex: 1; }
+.nav-links a {
+  color: #8b949e; text-decoration: none; font-size: 14px;
+  padding: 4px 10px; border-radius: 4px;
+}
+.nav-links a:hover { color: #e6edf3; background: #21262d; }
+.nav-links a.active { color: #fff; background: #1f6feb; }
+
+#map-toolbar {
+  display: flex; gap: 8px; align-items: center;
+  padding: 8px 12px; background: #161b22; border-bottom: 1px solid #30363d;
+  flex-wrap: wrap;
+}
+#map-toolbar button {
+  padding: 6px 12px; background: #21262d; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 4px; cursor: pointer;
+  font-size: 12px;
+}
+#map-toolbar button:hover { background: #30363d; }
+#map-toolbar button.primary { background: #238636; border-color: #2ea043; }
+#map-toolbar button.primary:hover { background: #2ea043; }
+#map-toolbar button.armed { background: #1f6feb; border-color: #388bfd; color: #fff; }
+#status-msg { margin-left: auto; font-size: 12px; color: #8b949e; }
+#status-msg.ok  { color: #56d364; }
+#status-msg.err { color: #f85149; }
+
+#map-main {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 0;
+  height: calc(100vh - 50px - 49px);
+}
+#canvas-wrap {
+  position: relative;
+  background: #0d1117;
+  overflow: hidden;
+}
+#map-svg {
+  width: 100%; height: 100%;
+  display: block;
+  cursor: grab;
+}
+#map-svg.panning { cursor: grabbing; }
+#hint {
+  position: absolute; bottom: 10px; left: 12px;
+  font-size: 11px; color: #6e7681;
+  background: rgba(0,0,0,0.4); padding: 4px 8px; border-radius: 3px;
+  pointer-events: none;
+}
+
+/* SVG content */
+.grid-line { stroke: #1f2933; stroke-width: 0.5; }
+.grid-line.major { stroke: #2d333b; }
+.edge {
+  stroke: #58a6ff; stroke-width: 2;
+  fill: none; cursor: pointer;
+}
+.edge:hover { stroke: #79c0ff; stroke-width: 3; }
+.edge.selected { stroke: #f0b429; stroke-width: 4; }
+.edge-hit {
+  stroke: transparent; stroke-width: 16; fill: none; cursor: pointer;
+  pointer-events: stroke;
+}
+.node-group { cursor: grab; }
+.node-group.dragging { cursor: grabbing; }
+.node-circle {
+  fill: #d2a8ff; stroke: #f0f6fc; stroke-width: 1.5;
+}
+.node-circle.area-east   { fill: #79c0ff; }
+.node-circle.area-center { fill: #d2a8ff; }
+.node-circle.area-west   { fill: #ffa657; }
+.node-circle.dev-entry        { fill: #56d364; }
+.node-circle.dev-waypoint     { fill: #6e7681; }
+.node-circle.dev-charge_point { fill: #f0b429; }
+.node-circle.selected { stroke: #f0b429; stroke-width: 3; }
+.node-circle.armed    { stroke: #1f6feb; stroke-width: 3; }
+.node-label {
+  fill: #e6edf3; font-size: 11px; pointer-events: none;
+  text-anchor: middle; user-select: none;
+  paint-order: stroke; stroke: #0d1117; stroke-width: 3;
+}
+.robot-marker {
+  fill: #f85149; stroke: #fff; stroke-width: 2;
+}
+
+/* Side panel */
+#side-panel {
+  background: #161b22;
+  border-left: 1px solid #30363d;
+  padding: 12px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+#side-panel h2 {
+  font-size: 13px; color: #8b949e;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin: 0 0 10px;
+}
+#empty-msg { color: #6e7681; font-size: 12px; }
+#side-panel form { display: flex; flex-direction: column; gap: 10px; }
+#side-panel label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: #8b949e;
+}
+#side-panel input, #side-panel select {
+  background: #0d1117; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 4px;
+  padding: 6px 8px; font-size: 13px;
+}
+#side-panel button.primary {
+  padding: 8px; background: #238636; color: #fff; border: none;
+  border-radius: 4px; cursor: pointer;
+}
+#side-panel button.primary:hover { background: #2ea043; }
+#side-panel fieldset {
+  border: 1px solid #30363d; border-radius: 4px; padding: 8px;
+}
+#side-panel legend { color: #8b949e; font-size: 11px; padding: 0 6px; }
+.tag-row { display: flex; gap: 4px; margin-bottom: 4px; }
+.tag-row input { flex: 1; }
+.tag-row button {
+  background: #6e1f1f; color: #fff; border: none;
+  border-radius: 3px; cursor: pointer; padding: 0 8px;
+}
+#nf-add-tag {
+  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+  border-radius: 3px; padding: 4px 8px; cursor: pointer; font-size: 11px;
+}

@@ -1,0 +1,515 @@
+// OSM map graph editor.
+// Coordinate convention (与项目一致): node.x = lon, node.y = lat
+// Screen y is flipped so larger y goes up.
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const svg = document.getElementById('map-svg');
+const gridLayer = document.getElementById('grid-layer');
+const edgeLayer = document.getElementById('edge-layer');
+const nodeLayer = document.getElementById('node-layer');
+const statusMsg = document.getElementById('status-msg');
+const osmPathBadge = document.getElementById('osm-path');
+
+let DATA = { osm_path: '', nodes: [], edges: [] };
+const nodeById = new Map();
+const edgeById = new Map();
+
+// view state: world-to-screen: sx = (wx - cx) * scale + W/2; sy = -(wy - cy) * scale + H/2
+const view = { cx: 0, cy: 0, scale: 8 };
+let dirty = false;
+
+let selectedNode = null;   // node object
+let selectedEdge = null;
+let armedAddEdge = false;
+let edgePickFirst = null;
+
+let nextNodeId = 1000;
+let nextEdgeId = 2000;
+
+// ---------- helpers ----------
+const $ = (id) => document.getElementById(id);
+function setStatus(text, kind = '') {
+  statusMsg.textContent = text;
+  statusMsg.className = kind;
+}
+function markDirty() {
+  dirty = true;
+  setStatus('● 有未保存修改', 'err');
+}
+
+function bbox() {
+  const r = svg.getBoundingClientRect();
+  return { w: r.width, h: r.height };
+}
+function w2sX(x) { const { w } = bbox(); return (x - view.cx) * view.scale + w / 2; }
+function w2sY(y) { const { h } = bbox(); return -(y - view.cy) * view.scale + h / 2; }
+function s2wX(sx) { const { w } = bbox(); return (sx - w / 2) / view.scale + view.cx; }
+function s2wY(sy) { const { h } = bbox(); return -(sy - h / 2) / view.scale + view.cy; }
+
+// ---------- data load/save ----------
+async function loadMap() {
+  setStatus('加载中...', '');
+  const r = await fetch('/api/map');
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    setStatus('加载失败: ' + (e.error || r.status), 'err');
+    return;
+  }
+  DATA = await r.json();
+  osmPathBadge.textContent = DATA.osm_path || '(未知路径)';
+  // 计算后续 id 起点 (避开已有数字 id)
+  let mn = 0, me = 0;
+  DATA.nodes.forEach((n) => { mn = Math.max(mn, parseInt(n.id) || 0); });
+  DATA.edges.forEach((e) => { me = Math.max(me, parseInt(e.id) || 0); });
+  nextNodeId = mn + 1;
+  nextEdgeId = Math.max(me + 1, 2000);
+
+  rebuildIndex();
+  fitView();
+  render();
+  setStatus(`已加载: ${DATA.nodes.length} 节点 / ${DATA.edges.length} 边`, 'ok');
+  dirty = false;
+}
+
+function rebuildIndex() {
+  nodeById.clear(); edgeById.clear();
+  DATA.nodes.forEach((n) => nodeById.set(String(n.id), n));
+  DATA.edges.forEach((e) => edgeById.set(String(e.id), e));
+}
+
+async function saveMap() {
+  setStatus('保存中...', '');
+  const body = {
+    osm_path: DATA.osm_path,
+    nodes: DATA.nodes,
+    edges: DATA.edges,
+  };
+  const r = await fetch('/api/map', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    setStatus(`✅ 已保存: ${j.path}`, 'ok');
+    dirty = false;
+  } else {
+    setStatus('保存失败: ' + (j.error || r.status), 'err');
+  }
+}
+
+// ---------- view ----------
+function fitView() {
+  if (!DATA.nodes.length) {
+    view.cx = 0; view.cy = 0; view.scale = 8;
+    return;
+  }
+  let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+  DATA.nodes.forEach((n) => {
+    minx = Math.min(minx, n.x); maxx = Math.max(maxx, n.x);
+    miny = Math.min(miny, n.y); maxy = Math.max(maxy, n.y);
+  });
+  const wx = Math.max(1, maxx - minx);
+  const wy = Math.max(1, maxy - miny);
+  const { w, h } = bbox();
+  const padding = 60;
+  view.scale = Math.min((w - padding * 2) / wx, (h - padding * 2) / wy);
+  view.cx = (minx + maxx) / 2;
+  view.cy = (miny + maxy) / 2;
+}
+
+// ---------- render ----------
+function render() {
+  // grid
+  gridLayer.innerHTML = '';
+  const { w, h } = bbox();
+  const step = 5; // world units
+  const x0 = Math.floor(s2wX(0) / step) * step;
+  const x1 = Math.ceil(s2wX(w) / step) * step;
+  const y0 = Math.floor(s2wY(h) / step) * step;
+  const y1 = Math.ceil(s2wY(0) / step) * step;
+  for (let x = x0; x <= x1; x += step) {
+    const sx = w2sX(x);
+    const ln = document.createElementNS(SVG_NS, 'line');
+    ln.setAttribute('x1', sx); ln.setAttribute('x2', sx);
+    ln.setAttribute('y1', 0);  ln.setAttribute('y2', h);
+    ln.setAttribute('class', 'grid-line' + (x % (step * 4) === 0 ? ' major' : ''));
+    gridLayer.appendChild(ln);
+  }
+  for (let y = y0; y <= y1; y += step) {
+    const sy = w2sY(y);
+    const ln = document.createElementNS(SVG_NS, 'line');
+    ln.setAttribute('y1', sy); ln.setAttribute('y2', sy);
+    ln.setAttribute('x1', 0);  ln.setAttribute('x2', w);
+    ln.setAttribute('class', 'grid-line' + (y % (step * 4) === 0 ? ' major' : ''));
+    gridLayer.appendChild(ln);
+  }
+
+  // edges
+  edgeLayer.innerHTML = '';
+  DATA.edges.forEach((e) => {
+    const a = nodeById.get(String(e.a));
+    const b = nodeById.get(String(e.b));
+    if (!a || !b) return;
+    const x1 = w2sX(a.x), y1 = w2sY(a.y), x2 = w2sX(b.x), y2 = w2sY(b.y);
+    // hit area (transparent thick line)
+    const hit = document.createElementNS(SVG_NS, 'line');
+    hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
+    hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
+    hit.setAttribute('class', 'edge-hit');
+    hit.addEventListener('click', (ev) => { ev.stopPropagation(); selectEdge(e); });
+    edgeLayer.appendChild(hit);
+    const ln = document.createElementNS(SVG_NS, 'line');
+    ln.setAttribute('x1', x1); ln.setAttribute('y1', y1);
+    ln.setAttribute('x2', x2); ln.setAttribute('y2', y2);
+    ln.setAttribute('class', 'edge' + (selectedEdge && selectedEdge.id === e.id ? ' selected' : ''));
+    ln.style.pointerEvents = 'none';
+    edgeLayer.appendChild(ln);
+  });
+
+  // nodes
+  nodeLayer.innerHTML = '';
+  DATA.nodes.forEach((n) => {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'node-group');
+    g.setAttribute('data-id', n.id);
+    const cx = w2sX(n.x), cy = w2sY(n.y);
+    g.setAttribute('transform', `translate(${cx},${cy})`);
+    const c = document.createElementNS(SVG_NS, 'circle');
+    let cls = 'node-circle';
+    if (n.tags && n.tags.area) cls += ' area-' + n.tags.area;
+    if (n.tags && n.tags.device_type) cls += ' dev-' + n.tags.device_type;
+    if (selectedNode && selectedNode.id === n.id) cls += ' selected';
+    if (armedAddEdge && edgePickFirst && edgePickFirst.id === n.id) cls += ' armed';
+    c.setAttribute('class', cls);
+    c.setAttribute('r', 9);
+    c.setAttribute('cx', 0); c.setAttribute('cy', 0);
+    g.appendChild(c);
+    const t = document.createElementNS(SVG_NS, 'text');
+    t.setAttribute('class', 'node-label');
+    t.setAttribute('y', -14);
+    t.textContent = n.name;
+    g.appendChild(t);
+
+    g.addEventListener('mousedown', (ev) => onNodeMouseDown(ev, n, g));
+    g.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (armedAddEdge) {
+        handleEdgePick(n);
+      } else {
+        selectNode(n);
+      }
+    });
+    nodeLayer.appendChild(g);
+  });
+}
+
+// ---------- selection ----------
+function selectNode(n) {
+  selectedNode = n; selectedEdge = null;
+  showNodeForm(n);
+  render();
+}
+function selectEdge(e) {
+  selectedEdge = e; selectedNode = null;
+  showEdgeForm(e);
+  render();
+}
+function clearSelection() {
+  selectedNode = null; selectedEdge = null;
+  $('node-form').style.display = 'none';
+  $('edge-form').style.display = 'none';
+  $('empty-msg').style.display = 'block';
+}
+
+// ---------- forms ----------
+function showNodeForm(n) {
+  $('empty-msg').style.display = 'none';
+  $('edge-form').style.display = 'none';
+  const f = $('node-form');
+  f.style.display = 'flex';
+  $('nf-id').value = n.id;
+  $('nf-name').value = n.name;
+  $('nf-x').value = n.x.toFixed(2);
+  $('nf-y').value = n.y.toFixed(2);
+  const tagsBox = $('nf-tags');
+  tagsBox.innerHTML = '';
+  Object.entries(n.tags || {}).forEach(([k, v]) => addTagRow(k, v));
+}
+function addTagRow(k = '', v = '') {
+  const row = document.createElement('div');
+  row.className = 'tag-row';
+  row.innerHTML = `<input placeholder="key" value="${k}" />
+                   <input placeholder="value" value="${v}" />
+                   <button type="button">×</button>`;
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  $('nf-tags').appendChild(row);
+}
+function showEdgeForm(e) {
+  $('empty-msg').style.display = 'none';
+  $('node-form').style.display = 'none';
+  const f = $('edge-form');
+  f.style.display = 'flex';
+  $('ef-id').value = e.id;
+  const a = nodeById.get(String(e.a));
+  const b = nodeById.get(String(e.b));
+  $('ef-a').value = a ? `${e.a} (${a.name})` : e.a;
+  $('ef-b').value = b ? `${e.b} (${b.name})` : b;
+  $('ef-name').value = e.name || '';
+}
+
+$('nf-add-tag').addEventListener('click', () => addTagRow());
+$('node-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  if (!selectedNode) return;
+  selectedNode.name = $('nf-name').value.trim();
+  selectedNode.x = parseFloat($('nf-x').value) || 0;
+  selectedNode.y = parseFloat($('nf-y').value) || 0;
+  const tags = {};
+  $('nf-tags').querySelectorAll('.tag-row').forEach((row) => {
+    const ins = row.querySelectorAll('input');
+    const k = ins[0].value.trim();
+    const v = ins[1].value.trim();
+    if (k) tags[k] = v;
+  });
+  selectedNode.tags = tags;
+  markDirty();
+  render();
+});
+$('edge-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  if (!selectedEdge) return;
+  selectedEdge.name = $('ef-name').value.trim();
+  markDirty();
+  render();
+});
+
+// ---------- node drag & pan/zoom ----------
+let dragging = null;     // {node, startMouse, startWorld}
+let panning = null;
+
+function onNodeMouseDown(ev, n, g) {
+  if (ev.button !== 0) return;
+  if (armedAddEdge) return;          // 不在选边模式时才允许拖
+  ev.stopPropagation();
+  ev.preventDefault();
+  dragging = { node: n, g };
+  g.classList.add('dragging');
+}
+
+svg.addEventListener('mousemove', (ev) => {
+  if (dragging) {
+    const r = svg.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    dragging.node.x = s2wX(mx);
+    dragging.node.y = s2wY(my);
+    dragging.g.setAttribute('transform', `translate(${mx},${my})`);
+    // 同步刷新该节点上的边
+    edgeLayer.querySelectorAll('line').forEach((ln) => { /* no-op (will redraw on mouseup) */ });
+    redrawEdgesOnly();
+    if (selectedNode === dragging.node) {
+      $('nf-x').value = dragging.node.x.toFixed(2);
+      $('nf-y').value = dragging.node.y.toFixed(2);
+    }
+    return;
+  }
+  if (panning) {
+    const dx = ev.clientX - panning.startX;
+    const dy = ev.clientY - panning.startY;
+    view.cx = panning.cx0 - dx / view.scale;
+    view.cy = panning.cy0 + dy / view.scale;
+    render();
+  }
+});
+
+svg.addEventListener('mouseup', (ev) => {
+  if (dragging) {
+    dragging.g.classList.remove('dragging');
+    markDirty();
+    dragging = null;
+    render();
+  }
+  if (panning) {
+    svg.classList.remove('panning');
+    panning = null;
+  }
+});
+
+svg.addEventListener('mousedown', (ev) => {
+  if (ev.button === 2 || ev.button === 1 ||
+      (ev.button === 0 && ev.target === svg)) {
+    panning = {
+      startX: ev.clientX, startY: ev.clientY,
+      cx0: view.cx, cy0: view.cy,
+    };
+    svg.classList.add('panning');
+    if (ev.button === 0) clearSelection();
+  }
+});
+
+svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+svg.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+  // 以鼠标点为缩放中心
+  const r = svg.getBoundingClientRect();
+  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const wxBefore = s2wX(mx), wyBefore = s2wY(my);
+  view.scale *= factor;
+  view.scale = Math.max(0.5, Math.min(view.scale, 200));
+  const wxAfter = s2wX(mx), wyAfter = s2wY(my);
+  view.cx += wxBefore - wxAfter;
+  view.cy += wyBefore - wyAfter;
+  render();
+}, { passive: false });
+
+function redrawEdgesOnly() {
+  // lightweight: re-set x,y of all edge lines without rebuilding
+  const lines = edgeLayer.querySelectorAll('line');
+  let i = 0;
+  DATA.edges.forEach((e) => {
+    const a = nodeById.get(String(e.a));
+    const b = nodeById.get(String(e.b));
+    if (!a || !b) return;
+    const hit = lines[i++], real = lines[i++];
+    if (!hit || !real) return;
+    const x1 = w2sX(a.x), y1 = w2sY(a.y), x2 = w2sX(b.x), y2 = w2sY(b.y);
+    hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
+    hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
+    real.setAttribute('x1', x1); real.setAttribute('y1', y1);
+    real.setAttribute('x2', x2); real.setAttribute('y2', y2);
+  });
+}
+
+window.addEventListener('resize', render);
+
+// ---------- toolbar ----------
+function newId(taken) {
+  let i = nextNodeId;
+  while (taken.has(String(i))) i++;
+  nextNodeId = i + 1;
+  return String(i);
+}
+function newEdgeId(taken) {
+  let i = nextEdgeId;
+  while (taken.has(String(i))) i++;
+  nextEdgeId = i + 1;
+  return String(i);
+}
+
+function addNodeAt(x, y) {
+  const id = newId(nodeById);
+  const n = {
+    id, name: '新节点_' + id, x, y,
+    tags: { area: 'center', device_type: 'waypoint' },
+  };
+  DATA.nodes.push(n);
+  nodeById.set(id, n);
+  selectNode(n);
+  markDirty();
+  render();
+}
+
+function handleEdgePick(n) {
+  if (!edgePickFirst) {
+    edgePickFirst = n;
+    setStatus(`已选起点 [${n.name}]，再点一个节点作为终点 (Esc 取消)`, '');
+    render();
+    return;
+  }
+  if (edgePickFirst.id === n.id) {
+    setStatus('起点与终点相同，已取消', 'err');
+    cancelArmedEdge();
+    return;
+  }
+  // 检查重复
+  const exist = DATA.edges.some(
+    (e) => (e.a === edgePickFirst.id && e.b === n.id) ||
+           (e.a === n.id && e.b === edgePickFirst.id));
+  if (exist) {
+    setStatus('该边已存在', 'err');
+    cancelArmedEdge();
+    return;
+  }
+  const id = newEdgeId(edgeById);
+  const e = {
+    id, a: edgePickFirst.id, b: n.id,
+    name: `${edgePickFirst.name}-${n.name}`,
+  };
+  DATA.edges.push(e); edgeById.set(id, e);
+  setStatus(`已添加边: ${e.name}`, 'ok');
+  cancelArmedEdge();
+  selectEdge(e);
+  markDirty();
+  render();
+}
+function cancelArmedEdge() {
+  armedAddEdge = false;
+  edgePickFirst = null;
+  $('btn-add-edge').classList.remove('armed');
+  render();
+}
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') cancelArmedEdge();
+  if (ev.key === 'Delete' && (selectedNode || selectedEdge)) deleteSelected();
+});
+
+function deleteSelected() {
+  if (selectedEdge) {
+    DATA.edges = DATA.edges.filter((e) => e.id !== selectedEdge.id);
+    edgeById.delete(selectedEdge.id);
+    setStatus('已删除边', 'ok');
+    selectedEdge = null;
+  } else if (selectedNode) {
+    const nid = selectedNode.id;
+    DATA.edges = DATA.edges.filter((e) => e.a !== nid && e.b !== nid);
+    DATA.nodes = DATA.nodes.filter((n) => n.id !== nid);
+    rebuildIndex();
+    setStatus('已删除节点及其相连边', 'ok');
+    selectedNode = null;
+  } else { return; }
+  clearSelection();
+  markDirty();
+  render();
+}
+
+document.querySelectorAll('#map-toolbar button').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const act = btn.dataset.act;
+    if (act === 'reload') {
+      if (dirty && !confirm('有未保存修改，确定重新加载?')) return;
+      loadMap();
+    } else if (act === 'add-node') {
+      addNodeAt(view.cx, view.cy);
+    } else if (act === 'add-here') {
+      try {
+        const r = await fetch('/api/robot_pose');
+        const j = await r.json();
+        addNodeAt(j.x, j.y);
+        setStatus(`已用机器人位置 (${j.x.toFixed(2)}, ${j.y.toFixed(2)}) 添加节点`, 'ok');
+      } catch (e) {
+        setStatus('获取机器人位置失败: ' + e, 'err');
+      }
+    } else if (act === 'add-edge') {
+      armedAddEdge = !armedAddEdge;
+      edgePickFirst = null;
+      btn.classList.toggle('armed', armedAddEdge);
+      setStatus(armedAddEdge ? '依次点击两个节点以连边 (Esc 取消)' : '已取消加边模式', '');
+      render();
+    } else if (act === 'delete') {
+      deleteSelected();
+    } else if (act === 'fit') {
+      fitView(); render();
+    } else if (act === 'save') {
+      saveMap();
+    }
+  });
+});
+
+window.addEventListener('beforeunload', (ev) => {
+  if (dirty) { ev.preventDefault(); ev.returnValue = ''; }
+});
+
+loadMap();
