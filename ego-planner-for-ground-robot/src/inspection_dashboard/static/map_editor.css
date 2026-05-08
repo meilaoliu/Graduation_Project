@@ -293,4 +293,14 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
   border-color: oklch(45% 0.14 25);
 }
 #archive-section .ar-restore:hover { background: oklch(42% 0.14 25); }
+#archive-section .ar-actions { display: flex; gap: 4px; flex-shrink: 0; }
+#archive-section .ar-delete {
+  background: var(--surface-2); color: var(--ink-3);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+}
+#archive-section .ar-delete:hover {
+  background: oklch(35% 0.12 25); color: var(--ink-1);
+  border-color: oklch(45% 0.14 25);
+}
 #nf-add-tag:hover { background: var(--surface-3); color: var(--ink-1); }

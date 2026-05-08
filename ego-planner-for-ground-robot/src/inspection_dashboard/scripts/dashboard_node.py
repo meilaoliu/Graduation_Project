@@ -479,7 +479,31 @@ def api_map_archives():
     return jsonify({'archives': items})
 
 
-@app.route('/api/map/restore', methods=['POST'])
+@app.route('/api/map/archives/delete', methods=['POST'])
+def api_map_archives_delete():
+    """删除指定的 osm 历史存档。
+    body: {"name": "substation.osm.YYYYmmdd_HHMMSS.osm"}
+    """
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '')
+    if not name or '/' in name or '\\' in name or '..' in name:
+        return jsonify({'ok': False, 'error': 'invalid name'}), 400
+    base = os.path.basename(_osm_path())
+    if not (name.startswith(base + '.') and name.endswith('.osm')):
+        return jsonify({'ok': False, 'error': 'name does not match archive pattern'}), 400
+    target = os.path.join(_archive_dir(), name)
+    if not os.path.isfile(target):
+        return jsonify({'ok': False, 'error': 'archive not found'}), 404
+    try:
+        os.remove(target)
+        rospy.loginfo(f"[dashboard] archive deleted: {target}")
+        return jsonify({'ok': True, 'deleted': name})
+    except Exception as e:
+        rospy.logerr(f"[dashboard] archive delete failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+
 def api_map_restore():
     body = request.get_json(silent=True) or {}
     name = body.get('name', '')

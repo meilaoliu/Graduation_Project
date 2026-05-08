@@ -909,7 +909,10 @@ async function refreshArchives() {
       li.innerHTML =
         `<div class="ar-meta"><span class="ar-time"></span>` +
         `<span class="ar-size">${sizeKb} KB</span></div>` +
-        `<button type="button" class="ar-restore">↶ 恢复</button>`;
+        `<div class="ar-actions">` +
+        `<button type="button" class="ar-restore" title="恢复到此版本">↶ 恢复</button>` +
+        `<button type="button" class="ar-delete" title="删除此存档">🗑</button>` +
+        `</div>`;
       li.querySelector('.ar-time').textContent = fmtArTime(it.mtime);
       li.title = it.name;
       li.querySelector('.ar-restore').addEventListener('click', async () => {
@@ -923,10 +926,25 @@ async function refreshArchives() {
           }).then((x) => x.json());
           if (!rr.ok) throw new Error(rr.error || 'restore failed');
           setStatus(`✅ 已恢复 ${it.name}`, 'ok');
-          await loadMap();         // 重新拉拓扑
-          await refreshArchives(); // 列表里多了一份"恢复前"的备份
+          await loadMap();
+          await refreshArchives();
         } catch (e) {
           setStatus('恢复失败: ' + e.message, 'err');
+        }
+      });
+      li.querySelector('.ar-delete').addEventListener('click', async () => {
+        if (!confirm(`确定删除存档 ${fmtArTime(it.mtime)}？\n此操作不可撤销。`)) return;
+        try {
+          const rr = await fetch('/api/map/archives/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: it.name }),
+          }).then((x) => x.json());
+          if (!rr.ok) throw new Error(rr.error || 'delete failed');
+          setStatus(`🗑 已删除 ${it.name}`, 'ok');
+          await refreshArchives();
+        } catch (e) {
+          setStatus('删除失败: ' + e.message, 'err');
         }
       });
       list.appendChild(li);
