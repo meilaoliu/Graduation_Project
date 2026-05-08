@@ -31,3 +31,5 @@ Dftpav/
 vln相关论文和代码/
 *.csv
 __pycache__/
+ego-planner-for-ground-robot/src/nlp_commander/tests/
+ego-planner-for-ground-robot/src/nlp_commander/maps/_archive/

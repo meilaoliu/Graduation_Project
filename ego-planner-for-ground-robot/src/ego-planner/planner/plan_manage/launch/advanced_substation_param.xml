@@ -231,8 +231,8 @@
     <param name="optimization/weight_curv" value="100.0" type="double"/>
     <param name="optimization/weight_sqrvariance" value="1000.0" type="double"/>
     <param name="optimization/weight_time" value="300.0" type="double"/>
-    <param name="optimization/obstacle_clearance" value="0.15" type="double"/>
-    <param name="optimization/obstacle_clearance_soft" value="0.25" type="double"/>
+    <param name="optimization/obstacle_clearance" value="0.25" type="double"/>
+    <param name="optimization/obstacle_clearance_soft" value="0.5" type="double"/>
     <param name="optimization/max_curv" value="$(arg max_k)" type="double"/>
 
     <!-- MPC 控制器参数 -->
