@@ -339,7 +339,7 @@ namespace ego_planner
     {
       for (size_t j = 0; j < pts_check[i].size(); ++j)
       {
-        occ = grid_map_->getInflateOccupancy(pts_check[i][j].second);
+        occ = isOccupied2d(pts_check[i][j].second);
 
         if (occ && !last_occ)
         {
@@ -577,7 +577,7 @@ namespace ego_planner
             cps_.flag_temp[j] = true;
             for (double a = length; a >= 0.0; a -= grid_map_->getResolution())
             {
-              bool occ = grid_map_->getInflateOccupancy((a / length) * intersection_point + (1 - a / length) * init_points.col(j));
+              bool occ = isOccupied2d((a / length) * intersection_point + (1 - a / length) * init_points.col(j));
 
               if (occ || a < grid_map_->getResolution())
               {
@@ -691,7 +691,7 @@ namespace ego_planner
     for (int i = 1; i <= i_end; ++i)
     {
 
-      bool occ = grid_map_->getInflateOccupancy(cps_.points.col(i));
+      bool occ = isOccupied2d(cps_.points.col(i));
 
       /*** check if the new collision will be valid ***/
       if (occ)
@@ -713,7 +713,7 @@ namespace ego_planner
         int j;
         for (j = i - 1; j >= 0; --j)
         {
-          occ = grid_map_->getInflateOccupancy(cps_.points.col(j));
+          occ = isOccupied2d(cps_.points.col(j));
           if (!occ)
           {
             in_id = j;
@@ -728,7 +728,7 @@ namespace ego_planner
 
         for (j = i + 1; j < cps_.cp_size; ++j)
         {
-          occ = grid_map_->getInflateOccupancy(cps_.points.col(j));
+          occ = isOccupied2d(cps_.points.col(j));
 
           if (!occ)
           {
@@ -872,7 +872,7 @@ namespace ego_planner
               cps_.flag_temp[j] = true;
               for (double a = length; a >= 0.0; a -= grid_map_->getResolution())
               {
-                bool occ = grid_map_->getInflateOccupancy((a / length) * intersection_point + (1 - a / length) * cps_.points.col(j));
+                bool occ = isOccupied2d((a / length) * intersection_point + (1 - a / length) * cps_.points.col(j));
 
                 if (occ || a < grid_map_->getResolution())
                 {
@@ -1018,7 +1018,7 @@ namespace ego_planner
           for (double a = 1; a > 0; a -= step_size)
           {
             Eigen::Vector3d pt(a * RichInfoSegs[i].first.points.col(j) + (1 - a) * RichInfoSegs[i].first.points.col(j + 1));
-            if (grid_map_->getInflateOccupancy(pt))
+            if (isOccupied2d(pt))
             {
               occ_start_id = j;
               occ_start_pt = pt;
@@ -1034,7 +1034,7 @@ namespace ego_planner
           for (double a = 1; a > 0; a -= step_size)
           {
             Eigen::Vector3d pt(a * RichInfoSegs[i].first.points.col(j) + (1 - a) * RichInfoSegs[i].first.points.col(j - 1));
-            if (grid_map_->getInflateOccupancy(pt))
+            if (isOccupied2d(pt))
             {
               occ_end_id = j;
               occ_end_pt = pt;
@@ -1101,14 +1101,14 @@ namespace ego_planner
             base_pt_reverse = RichInfoSegs[i].first.points.col(j) + base_vec_reverse * (RichInfoSegs[i].first.base_point[j][0] - RichInfoSegs[i].first.points.col(j)).norm();
           }
 
-          if (grid_map_->getInflateOccupancy(base_pt_reverse)) // Search outward.
+          if (isOccupied2d(base_pt_reverse)) // Search outward.
           {
             double l_upbound = 5 * CTRL_PT_DIST; // "5" is the threshold.
             double l = RESOLUTION;
             for (; l <= l_upbound; l += RESOLUTION)
             {
               Eigen::Vector3d base_pt_temp = base_pt_reverse + l * base_vec_reverse;
-              if (!grid_map_->getInflateOccupancy(base_pt_temp))
+              if (!isOccupied2d(base_pt_temp))
               {
                 RichInfoSegs[i].second.base_point[j][0] = base_pt_temp;
                 RichInfoSegs[i].second.direction[j][0] = base_vec_reverse;
@@ -1169,14 +1169,14 @@ namespace ego_planner
         Eigen::Vector3d base_vec_reverse = -RichInfoSegs[i].first.direction[0][0];
         Eigen::Vector3d base_pt_reverse = RichInfoSegs[i].first.points.col(0) + base_vec_reverse * (RichInfoSegs[i].first.base_point[0][0] - RichInfoSegs[i].first.points.col(0)).norm();
 
-        if (grid_map_->getInflateOccupancy(base_pt_reverse)) // Search outward.
+        if (isOccupied2d(base_pt_reverse)) // Search outward.
         {
           double l_upbound = 5 * CTRL_PT_DIST; // "5" is the threshold.
           double l = RESOLUTION;
           for (; l <= l_upbound; l += RESOLUTION)
           {
             Eigen::Vector3d base_pt_temp = base_pt_reverse + l * base_vec_reverse;
-            if (!grid_map_->getInflateOccupancy(base_pt_temp))
+            if (!isOccupied2d(base_pt_temp))
             {
               RichInfoSegs[i].second.base_point[0][0] = base_pt_temp;
               RichInfoSegs[i].second.direction[0][0] = base_vec_reverse;
