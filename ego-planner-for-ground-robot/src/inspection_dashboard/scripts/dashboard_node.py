@@ -178,52 +178,150 @@ def _parse_osm_to_payload(path):
     return {'osm_path': path, 'nodes': nodes, 'edges': edges}
 
 
+def _set_or_replace_tag(elem, k, v):
+    """在 elem 下找 <tag k=k>，更新 v；不存在则新增。"""
+    for t in elem.findall('tag'):
+        if t.get('k') == k:
+            if t.get('v') != v:
+                t.set('v', v)
+            return False  # not added
+    ET.SubElement(elem, 'tag', {'k': k, 'v': v})
+    return True
+
+
+def _remove_extra_tags(elem, keep_keys):
+    """删除 elem 下不在 keep_keys 里的 <tag>。"""
+    for t in list(elem.findall('tag')):
+        if t.get('k') not in keep_keys:
+            elem.remove(t)
+
+
+def _indent_inplace(elem, level=0, step='  '):
+    """给单个新增 element 加缩进文本（只影响它自己和子节点，不动兄弟）。"""
+    i = '\n' + level * step
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + step
+        for child in elem:
+            _indent_inplace(child, level + 1, step)
+            if not child.tail or not child.tail.strip():
+                child.tail = i + step
+        if elem[-1].tail:
+            elem[-1].tail = i
+    if level and (not elem.tail or not elem.tail.strip()):
+        elem.tail = i
+
+
+def _coord_eq(old_str, new_val):
+    """判断坐标字符串和 float 是否等价（避免把 '27' 改成 '27.0'）。"""
+    if old_str is None:
+        return False
+    try:
+        return abs(float(old_str) - float(new_val)) < 1e-9
+    except Exception:
+        return False
+
+
 def _write_osm_payload(path, payload):
-    """把前端传回的 nodes/edges 重新写回 osm 文件 (带备份)。"""
+    """就地更新 osm：只改用户实际修改的 lat/lon/tag，最小化 diff。
+
+    保留原文件的注释、空行、属性顺序、XML declaration 大小写。
+    新节点/边追加到末尾；被删除的节点/边从 tree 移除。
+    """
     nodes = payload.get('nodes', [])
     edges = payload.get('edges', [])
 
-    # 读原文件以保留 root attrs / 注释 (注释另行注入)
-    try:
-        orig_root = ET.parse(path).getroot()
-        gen = orig_root.get('generator', 'manual')
-    except Exception:
-        gen = 'manual'
+    if os.path.exists(path):
+        # insert_comments=True 让 <!-- ... --> 被保留为 ET.Comment 节点
+        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+        tree = ET.parse(path, parser=parser)
+        root = tree.getroot()
+    else:
+        root = ET.Element('osm', {'version': '0.6', 'generator': 'manual'})
+        tree = ET.ElementTree(root)
 
-    osm = ET.Element('osm', {'version': '0.6', 'generator': gen})
+    # 建索引（跳过 Comment）
+    node_by_id = {n.get('id'): n for n in root.findall('node')}
+    way_by_id = {w.get('id'): w for w in root.findall('way')}
+
+    seen_node_ids = set()
+    seen_way_ids = set()
 
     for n in nodes:
-        attrs = {'id': str(n['id']),
-                 'lat': str(n.get('y', 0.0)),
-                 'lon': str(n.get('x', 0.0))}
-        e = ET.SubElement(osm, 'node', attrs)
-        # name 第一
+        nid = str(n['id'])
+        seen_node_ids.add(nid)
+        new_lat = n.get('y', 0.0)
+        new_lon = n.get('x', 0.0)
+        tags = dict(n.get('tags') or {})
         if n.get('name'):
-            ET.SubElement(e, 'tag', {'k': 'name', 'v': str(n['name'])})
-        for k, v in (n.get('tags') or {}).items():
-            if k == 'name':
-                continue
-            ET.SubElement(e, 'tag', {'k': str(k), 'v': str(v)})
+            tags['name'] = str(n['name'])
+
+        elem = node_by_id.get(nid)
+        if elem is None:
+            elem = ET.SubElement(root, 'node',
+                                 {'id': nid, 'lat': str(new_lat), 'lon': str(new_lon)})
+            for k, v in tags.items():
+                ET.SubElement(elem, 'tag', {'k': str(k), 'v': str(v)})
+            _indent_inplace(elem, level=1)
+        else:
+            # 数值不变时保留原始字符串格式（'27' 不变成 '27.0'）
+            if not _coord_eq(elem.get('lat'), new_lat):
+                elem.set('lat', str(new_lat))
+            if not _coord_eq(elem.get('lon'), new_lon):
+                elem.set('lon', str(new_lon))
+            for k, v in tags.items():
+                _set_or_replace_tag(elem, str(k), str(v))
+            _remove_extra_tags(elem, set(map(str, tags.keys())))
+
+    for nid, elem in node_by_id.items():
+        if nid not in seen_node_ids:
+            root.remove(elem)
 
     for ed in edges:
-        wattrs = {'id': str(ed['id'])}
-        we = ET.SubElement(osm, 'way', wattrs)
-        ET.SubElement(we, 'nd', {'ref': str(ed['a'])})
-        ET.SubElement(we, 'nd', {'ref': str(ed['b'])})
-        if ed.get('name'):
-            ET.SubElement(we, 'tag', {'k': 'name', 'v': str(ed['name'])})
+        wid = str(ed['id'])
+        seen_way_ids.add(wid)
+        a = str(ed['a']); b = str(ed['b'])
+        name = str(ed['name']) if ed.get('name') else None
 
-    # pretty-print
-    rough = ET.tostring(osm, encoding='utf-8')
-    pretty = minidom.parseString(rough).toprettyxml(indent='  ', encoding='utf-8')
+        elem = way_by_id.get(wid)
+        if elem is None:
+            elem = ET.SubElement(root, 'way', {'id': wid})
+            ET.SubElement(elem, 'nd', {'ref': a})
+            ET.SubElement(elem, 'nd', {'ref': b})
+            if name:
+                ET.SubElement(elem, 'tag', {'k': 'name', 'v': name})
+            _indent_inplace(elem, level=1)
+        else:
+            nds = elem.findall('nd')
+            new_refs = [a, b]
+            old_refs = [nd.get('ref') for nd in nds]
+            if old_refs != new_refs:
+                tags_keep = list(elem.findall('tag'))
+                for child in list(elem):
+                    elem.remove(child)
+                ET.SubElement(elem, 'nd', {'ref': a})
+                ET.SubElement(elem, 'nd', {'ref': b})
+                for t in tags_keep:
+                    elem.append(t)
+            if name:
+                _set_or_replace_tag(elem, 'name', name)
+                _remove_extra_tags(elem, {'name'})
+            else:
+                _remove_extra_tags(elem, set())
 
-    # 备份 + 原子写
-    if os.path.exists(path):
-        bak = path + '.bak.' + _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-        shutil.copy2(path, bak)
+    for wid, elem in way_by_id.items():
+        if wid not in seen_way_ids:
+            root.remove(elem)
+
+    # 序列化：自己控制属性引号(") 和自闭合标签格式(<tag .../>)，匹配原文件风格
+    body = ET.tostring(root, encoding='unicode', short_empty_elements=True)
+    # ET 默认输出 ` />`（带空格），原文件是 `/>`（无空格） → 修正
+    body = body.replace(' />', '/>')
+    out = '<?xml version="1.0" encoding="UTF-8"?>\n' + body + '\n'
+
     tmp = path + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(pretty)
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(out)
     os.replace(tmp, path)
     return True
 
@@ -256,14 +354,13 @@ def _write_simplified_osm(path, payload):
             if k == 'name':
                 continue
             ET.SubElement(e, 'tag', {'k': str(k), 'v': str(v)})
-    rough = ET.tostring(osm, encoding='utf-8')
-    pretty = minidom.parseString(rough).toprettyxml(indent='  ', encoding='utf-8')
-    if os.path.exists(path):
-        bak = path + '.bak.' + _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-        shutil.copy2(path, bak)
+    _indent_inplace(osm, level=0)
+    body = ET.tostring(osm, encoding='unicode', short_empty_elements=True)
+    body = body.replace(' />', '/>')
+    out = '<?xml version="1.0" encoding="UTF-8"?>\n' + body + '\n'
     tmp = path + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(pretty)
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(out)
     os.replace(tmp, path)
 
 
