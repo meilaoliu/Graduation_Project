@@ -290,6 +290,9 @@ def api_map_post():
     if not (target == default or parent == os.path.dirname(default)):
         return jsonify({'error': 'osm_path not allowed'}), 403
     try:
+        # 1. 自动存档（如果旧文件存在），保留误操作回滚能力
+        archive_msg = _archive_osm_if_exists(target)
+
         _write_osm_payload(target, payload)
         # 同步生成简化版 (供 LLM 使用)
         simp_path = _simplified_osm_path(target)
@@ -306,16 +309,106 @@ def api_map_post():
         rospy.loginfo(f"[dashboard] osm saved: {target} "
                       f"(nodes={len(payload['nodes'])}, edges={len(payload['edges'])}, "
                       f"simplified={'ok' if simp_ok else 'fail'}, "
-                      f"reload={'ok' if reload_ok else 'fail'})")
+                      f"reload={'ok' if reload_ok else 'fail'}, "
+                      f"archive={archive_msg})")
         return jsonify({
             'ok': True,
             'path': target,
+            'archive':    archive_msg,
             'simplified': {'ok': simp_ok, 'msg': simp_msg},
             'reload':     {'ok': reload_ok, 'msg': reload_msg},
         })
     except Exception as e:
         rospy.logerr(f"[dashboard] osm save failed: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# OSM 历史存档（误操作回滚）
+# ---------------------------------------------------------------------------
+def _archive_dir():
+    return os.path.join(os.path.dirname(_osm_path()), '_archive')
+
+
+def _archive_osm_if_exists(target_path):
+    if not os.path.isfile(target_path):
+        return 'no-prior'
+    try:
+        d = _archive_dir()
+        os.makedirs(d, exist_ok=True)
+        ts = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+        base = os.path.basename(target_path)
+        archive_name = f'{base}.{ts}.osm'
+        archive_path = os.path.join(d, archive_name)
+        # 简单 copy
+        with open(target_path, 'rb') as fin, open(archive_path, 'wb') as fout:
+            fout.write(fin.read())
+        # 限制最多保留 30 份，按修改时间删旧的
+        snaps = sorted(
+            (f for f in os.listdir(d) if f.startswith(base + '.') and f.endswith('.osm')),
+            key=lambda f: os.path.getmtime(os.path.join(d, f)),
+        )
+        for old in snaps[:-30]:
+            try:
+                os.remove(os.path.join(d, old))
+            except Exception:
+                pass
+        return archive_name
+    except Exception as e:
+        rospy.logwarn(f"[dashboard] archive failed: {e}")
+        return f'fail: {e}'
+
+
+@app.route('/api/map/archives', methods=['GET'])
+def api_map_archives():
+    d = _archive_dir()
+    items = []
+    if os.path.isdir(d):
+        base = os.path.basename(_osm_path())
+        for name in os.listdir(d):
+            if not (name.startswith(base + '.') and name.endswith('.osm')):
+                continue
+            path = os.path.join(d, name)
+            try:
+                st = os.stat(path)
+                items.append({
+                    'name': name,
+                    'mtime': st.st_mtime,
+                    'size': st.st_size,
+                })
+            except Exception:
+                pass
+    items.sort(key=lambda x: x['mtime'], reverse=True)
+    return jsonify({'archives': items})
+
+
+@app.route('/api/map/restore', methods=['POST'])
+def api_map_restore():
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '')
+    if not name or '/' in name or '\\' in name or '..' in name:
+        return jsonify({'ok': False, 'error': 'invalid name'}), 400
+    src = os.path.join(_archive_dir(), name)
+    if not os.path.isfile(src):
+        return jsonify({'ok': False, 'error': 'archive not found'}), 404
+    target = _osm_path()
+    try:
+        # 把当前 osm 也存一档（防止恢复后又想回到刚才的状态）
+        _archive_osm_if_exists(target)
+        with open(src, 'rb') as fin, open(target, 'wb') as fout:
+            fout.write(fin.read())
+        # 解析回 payload，重生成简化版 + reload
+        payload = _parse_osm_to_payload(target)
+        try:
+            _write_simplified_osm(_simplified_osm_path(target), payload)
+        except Exception as e:
+            rospy.logwarn(f"[dashboard] simplified write failed on restore: {e}")
+        reload_ok, reload_msg = _call_reload_map_service()
+        return jsonify({'ok': True, 'restored': name,
+                        'reload': {'ok': reload_ok, 'msg': reload_msg}})
+    except Exception as e:
+        rospy.logerr(f"[dashboard] restore failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/robot_pose', methods=['GET'])
@@ -398,6 +491,70 @@ def api_basemap_config_post():
         merged = _basemap_save_cfg(body)
         return jsonify({'ok': True, 'config': merged})
     except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/basemap/upload', methods=['POST'])
+def api_basemap_upload():
+    """允许从浏览器上传任意本地图片作为底图。
+
+    支持两种姿势：
+      A) multipart/form-data  字段 file=<文件>
+      B) JSON                 {filename, data_url} (data_url 以 'data:image/...;base64,' 开头)
+    上传后保存到 static/basemap/，文件名清洗后返回。
+    """
+    import re as _re
+    import base64 as _b64
+    saved_name = None
+    saved_bytes = None
+
+    # ---- 模式 A: multipart ----
+    if 'file' in request.files:
+        f = request.files['file']
+        raw_name = (f.filename or '').strip()
+        if not raw_name:
+            return jsonify({'ok': False, 'error': 'empty filename'}), 400
+        saved_bytes = f.read()
+        saved_name = raw_name
+    else:
+        body = request.get_json(silent=True) or {}
+        data_url = body.get('data_url') or ''
+        raw_name = (body.get('filename') or '').strip()
+        m = _re.match(r'^data:([^;]+);base64,(.+)$', data_url)
+        if not (m and raw_name):
+            return jsonify({'ok': False, 'error': 'expect multipart "file" or JSON {filename, data_url}'}), 400
+        try:
+            saved_bytes = _b64.b64decode(m.group(2))
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'bad base64: {e}'}), 400
+        saved_name = raw_name
+
+    # 清洗文件名 + 后缀白名单
+    safe = _re.sub(r'[^A-Za-z0-9._\u4e00-\u9fa5-]', '_', saved_name)
+    safe = safe.lstrip('._') or 'upload'
+    base, ext = os.path.splitext(safe)
+    if ext.lower() not in _BASEMAP_EXTS:
+        return jsonify({'ok': False, 'error': f'unsupported ext: {ext}'}), 400
+
+    try:
+        os.makedirs(_BASEMAP_DIR, exist_ok=True)
+        # 重名加后缀
+        target = os.path.join(_BASEMAP_DIR, safe)
+        if os.path.exists(target):
+            ts = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+            safe = f'{base}_{ts}{ext}'
+            target = os.path.join(_BASEMAP_DIR, safe)
+        with open(target, 'wb') as fout:
+            fout.write(saved_bytes)
+        rospy.loginfo(f"[dashboard] basemap uploaded: {target} ({len(saved_bytes)} bytes)")
+        return jsonify({
+            'ok': True,
+            'name': safe,
+            'url': f'/static/basemap/{safe}',
+            'size': len(saved_bytes),
+        })
+    except Exception as e:
+        rospy.logerr(f"[dashboard] basemap upload failed: {e}")
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 

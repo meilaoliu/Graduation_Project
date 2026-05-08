@@ -84,16 +84,32 @@
         <label id="bm-url-row" style="display:none">URL
           <input id="bm-url" type="text" placeholder="https://..." />
         </label>
+        <label class="row">
+          <input type="file" id="bm-upload-input" accept="image/*" style="display:none" />
+          <button type="button" id="bm-upload-btn">📤 上传本地图片…</button>
+        </label>
         <label>中心 X <input id="bm-cx" type="number" step="0.1" /></label>
         <label>中心 Y <input id="bm-cy" type="number" step="0.1" /></label>
         <label>世界宽度 (m) <input id="bm-w" type="number" step="0.5" min="1" /></label>
         <label>旋转 (°) <input id="bm-rot" type="number" step="1" /></label>
         <label>不透明度 <input id="bm-op" type="range" min="0" max="1" step="0.05" /></label>
         <label class="row"><input type="checkbox" id="bm-drag" /> 拖动模式（左键拖动底图）</label>
-        <div class="row" style="gap:6px">
-          <button type="button" id="bm-fit">中心对齐节点 bbox</button>
-          <button type="button" id="bm-save" class="primary">保存底图配置</button>
+        <div class="row" style="gap:6px; flex-wrap:wrap">
+          <button type="button" id="bm-restore" title="恢复到上次保存的位置/缩放">↺ 恢复已保存配置</button>
+          <button type="button" id="bm-fit" title="把底图粗略放在节点 bbox 中央，方便首次找到它">📍 粗对齐到节点中心</button>
         </div>
+        <div class="row" style="gap:6px">
+          <button type="button" id="bm-save" class="primary">💾 保存底图配置</button>
+        </div>
+      </div>
+    </details>
+
+    <details id="archive-section">
+      <summary>🗂️ 拓扑历史存档</summary>
+      <div class="archive-body">
+        <p class="hint-text">每次保存 OSM 时自动备份。最多保留 30 份。</p>
+        <button type="button" id="ar-refresh">↻ 刷新列表</button>
+        <ul id="ar-list"></ul>
       </div>
     </details>
   </aside>

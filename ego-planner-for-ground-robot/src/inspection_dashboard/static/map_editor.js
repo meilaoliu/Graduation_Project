@@ -789,6 +789,52 @@ async function initBasemapUI() {
     basemapDirty = true;
     render();
   });
+  $('bm-restore').addEventListener('click', async () => {
+    try {
+      const cfg = await fetch('/api/basemap/config').then((x) => x.json());
+      Object.assign(BASEMAP, cfg);
+      syncBasemapUIFromState();
+      if (BASEMAP.enabled) loadBasemapNaturalSize(); else render();
+      basemapDirty = false;
+      setStatus('↺ 已恢复到上次保存的底图配置', 'ok');
+    } catch (e) {
+      setStatus('恢复失败: ' + e.message, 'err');
+    }
+  });
+  $('bm-upload-btn').addEventListener('click', () => $('bm-upload-input').click());
+  $('bm-upload-input').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('file', f, f.name);
+    setStatus('上传中…', '');
+    try {
+      const r = await fetch('/api/basemap/upload', { method: 'POST', body: fd })
+        .then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || 'upload failed');
+      // 刷新文件列表 & 自动选中新文件 & 启用底图
+      const list = await fetch('/api/basemap/list').then((x) => x.json());
+      const sel = $('bm-file');
+      sel.innerHTML = '';
+      (list.files || []).forEach((ff) => {
+        const o = document.createElement('option');
+        o.value = ff.name; o.textContent = ff.name;
+        sel.appendChild(o);
+      });
+      sel.value = r.name;
+      BASEMAP.source = 'local';
+      BASEMAP.src = r.name;
+      BASEMAP.enabled = true;
+      syncBasemapUIFromState();
+      basemapDirty = true;
+      loadBasemapNaturalSize();
+      setStatus(`✅ 已上传 ${r.name} (${(r.size/1024).toFixed(0)} KB)`, 'ok');
+    } catch (err) {
+      setStatus('上传失败: ' + err.message, 'err');
+    } finally {
+      e.target.value = '';
+    }
+  });
   $('bm-save').addEventListener('click', async () => {
     try {
       const r = await fetch('/api/basemap/config', {
@@ -836,5 +882,62 @@ function syncBasemapUIFromState() {
 }
 
 initBasemapUI();
+
+// ============================================================
+// 拓扑历史存档 UI
+// ============================================================
+function fmtArTime(mtime) {
+  const d = new Date(mtime * 1000);
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+async function refreshArchives() {
+  const list = $('ar-list');
+  list.innerHTML = '<li class="hint-text">加载中…</li>';
+  try {
+    const r = await fetch('/api/map/archives').then((x) => x.json());
+    list.innerHTML = '';
+    if (!r.archives || !r.archives.length) {
+      list.innerHTML = '<li class="hint-text">暂无存档</li>';
+      return;
+    }
+    r.archives.forEach((it) => {
+      const li = document.createElement('li');
+      li.className = 'ar-item';
+      const sizeKb = (it.size / 1024).toFixed(1);
+      li.innerHTML =
+        `<div class="ar-meta"><span class="ar-time"></span>` +
+        `<span class="ar-size">${sizeKb} KB</span></div>` +
+        `<button type="button" class="ar-restore">↶ 恢复</button>`;
+      li.querySelector('.ar-time').textContent = fmtArTime(it.mtime);
+      li.title = it.name;
+      li.querySelector('.ar-restore').addEventListener('click', async () => {
+        if (!confirm(`恢复到 ${fmtArTime(it.mtime)} 的版本？\n` +
+                     `当前未保存的修改会丢失，但当前文件会先存档一次。`)) return;
+        try {
+          const rr = await fetch('/api/map/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: it.name }),
+          }).then((x) => x.json());
+          if (!rr.ok) throw new Error(rr.error || 'restore failed');
+          setStatus(`✅ 已恢复 ${it.name}`, 'ok');
+          await loadMap();         // 重新拉拓扑
+          await refreshArchives(); // 列表里多了一份"恢复前"的备份
+        } catch (e) {
+          setStatus('恢复失败: ' + e.message, 'err');
+        }
+      });
+      list.appendChild(li);
+    });
+  } catch (e) {
+    list.innerHTML = `<li class="hint-text err">加载失败: ${e.message}</li>`;
+  }
+}
+$('ar-refresh').addEventListener('click', refreshArchives);
+$('archive-section').addEventListener('toggle', (e) => {
+  if (e.target.open) refreshArchives();
+});
 
 loadMap();
