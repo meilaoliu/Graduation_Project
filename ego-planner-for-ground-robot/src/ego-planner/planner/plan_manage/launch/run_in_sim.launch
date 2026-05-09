@@ -7,6 +7,7 @@
   <!-- topic of your odometry such as VIO or LIO -->
   <arg name="odom_topic" value="/state_estimation" />
   <arg name="pointcloud_topic" value="/registered_scan" />
+  <arg name="use_patchworkpp" value="true" />
   
   <arg name="use_rqt_robot_steering" value="true" />
   
@@ -104,12 +105,22 @@
     <remap from="/odom_world" to="$(arg odom_topic)"/>
   </node>
 
-  <rosparam command="load" file="$(find patchwork)/config/params_ouster128.yaml" />
+  <group if="$(arg use_patchworkpp)">
+    <rosparam command="load" file="$(find patchworkpp_ros1)/config/params_ouster128.yaml" />
+    <node name="$(anon patchworkpp_offline_own_data)" pkg="patchworkpp_ros1" type="patchworkpp_offline_own_data" output="screen">
+      <remap from="/pointcloud_scan" to="$(arg pointcloud_topic)"/>
+      <remap from="/state_estimation" to="$(arg odom_topic)"/>
+    </node>
+  </group>
 
-  <node name="$(anon offline_own_data)" pkg="patchwork" type="offline_own_data" output="screen">
-  <rosparam param="/algorithm">"patchwork"</rosparam> 
-  <remap from="/pointcloud_scan" to="$(arg pointcloud_topic)"/>
-  </node>
+  <group unless="$(arg use_patchworkpp)">
+    <rosparam command="load" file="$(find patchwork)/config/params_ouster128.yaml" />
+    <node name="$(anon offline_own_data)" pkg="patchwork" type="offline_own_data" output="screen">
+      <rosparam param="/algorithm">"patchwork"</rosparam>
+      <remap from="/pointcloud_scan" to="$(arg pointcloud_topic)"/>
+      <remap from="/state_estimation" to="$(arg odom_topic)"/>
+    </node>
+  </group>
 
   <include file="$(find ego_planner)/launch/rviz.launch"/>
 

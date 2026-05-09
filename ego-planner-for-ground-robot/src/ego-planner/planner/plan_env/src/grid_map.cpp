@@ -55,6 +55,11 @@ void GridMap::initMap(ros::NodeHandle &nh)
 
   node_.param("grid_map/frame_id", mp_.frame_id_, string("map"));
   node_.param("grid_map/local_map_margin", mp_.local_map_margin_, 1);
+  node_.param("grid_map/segmentation_2d_p_hit", mp_.segmentation_2d_p_hit_, 0.65);
+  node_.param("grid_map/segmentation_2d_p_miss", mp_.segmentation_2d_p_miss_, 0.48);
+  node_.param("grid_map/segmentation_2d_p_min", mp_.segmentation_2d_p_min_, 0.12);
+  node_.param("grid_map/segmentation_2d_p_max", mp_.segmentation_2d_p_max_, 0.97);
+  node_.param("grid_map/segmentation_2d_p_occ", mp_.segmentation_2d_p_occ_, 0.80);
   node_.param("grid_map/ground_height", mp_.ground_height_, 1.0);
 
   mp_.resolution_inv_ = 1 / mp_.resolution_;
@@ -66,6 +71,11 @@ void GridMap::initMap(ros::NodeHandle &nh)
   mp_.clamp_min_log_ = logit(mp_.p_min_);
   mp_.clamp_max_log_ = logit(mp_.p_max_);
   mp_.min_occupancy_log_ = logit(mp_.p_occ_);
+  mp_.segmentation_2d_prob_hit_log_ = logit(mp_.segmentation_2d_p_hit_);
+  mp_.segmentation_2d_prob_miss_log_ = logit(mp_.segmentation_2d_p_miss_);
+  mp_.segmentation_2d_clamp_min_log_ = logit(mp_.segmentation_2d_p_min_);
+  mp_.segmentation_2d_clamp_max_log_ = logit(mp_.segmentation_2d_p_max_);
+  mp_.segmentation_2d_min_occupancy_log_ = logit(mp_.segmentation_2d_p_occ_);
   mp_.unknown_flag_ = 0.01;
 
   cout << "hit: " << mp_.prob_hit_log_ << endl;
@@ -85,8 +95,10 @@ void GridMap::initMap(ros::NodeHandle &nh)
   int buffer_size_2d = mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1);
 
   md_.occupancy_buffer_ = vector<double>(buffer_size, mp_.clamp_min_log_ - mp_.unknown_flag_);
+  md_.occupancy_buffer_2d_ = vector<double>(buffer_size_2d, 0.0);
   md_.occupancy_buffer_inflate_ = vector<char>(buffer_size, 0);
   md_.occupancy_buffer_inflate_segmentation_ = vector<char>(buffer_size, 0);
+  md_.occupancy_2d_free_observed_ = vector<char>(buffer_size_2d, 0);
   md_.terrain_height_ = vector<double>(buffer_size_2d,0);
   if(mp_.map_type_==EXPLORATION)
   {
@@ -147,8 +159,11 @@ void GridMap::initMap(ros::NodeHandle &nh)
       node_.subscribe<nav_msgs::Odometry>("/grid_map/odom", 10, &GridMap::odomCallback, this);
   if(mp_.map_type_==PLANNING)
   {
-      indep_cloud_segmentation_sub_ =
-              node_.subscribe<sensor_msgs::PointCloud2>("/benchmark/N", 10, &GridMap::cloudSegmentationCallback_PLANNING, this);
+      ground_segmentation_sub_.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(node_, "/benchmark/P", 10));
+      nonground_segmentation_sub_.reset(new message_filters::Subscriber<sensor_msgs::PointCloud2>(node_, "/benchmark/N", 10));
+      sync_ground_nonground_.reset(new message_filters::Synchronizer<SyncPolicyGroundNonground>(
+          SyncPolicyGroundNonground(20), *ground_segmentation_sub_, *nonground_segmentation_sub_));
+      sync_ground_nonground_->registerCallback(boost::bind(&GridMap::cloudSegmentationCallback_PLANNING, this, _1, _2));
 
   }else if(mp_.map_type_==EXPLORATION)
   {
@@ -1143,11 +1158,14 @@ void GridMap::cloudSegmentationCallback_EXPLORATION(const sensor_msgs::PointClou
 
 }
 
-void GridMap::cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2ConstPtr &cloud_segmentation) {
+void GridMap::cloudSegmentationCallback_PLANNING(
+    const sensor_msgs::PointCloud2ConstPtr &ground_segmentation,
+    const sensor_msgs::PointCloud2ConstPtr &nonground_segmentation) {
     my_count+=1;
     ros::Time time_begin = ros::Time::now();
-    pcl::PointCloud<pcl::PointXYZ> latest_cloud;
-    pcl::fromROSMsg(*cloud_segmentation, latest_cloud);
+    pcl::PointCloud<pcl::PointXYZ> ground_cloud, nonground_cloud;
+    pcl::fromROSMsg(*ground_segmentation, ground_cloud);
+    pcl::fromROSMsg(*nonground_segmentation, nonground_cloud);
 
     if (!md_.has_odom_)
     {
@@ -1155,19 +1173,32 @@ void GridMap::cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2C
         return;
     }
 
-    if (latest_cloud.points.size() == 0)
+    if (ground_cloud.points.empty() && nonground_cloud.points.empty())
         return;
 
     if (isnan(md_.camera_pos_(0)) || isnan(md_.camera_pos_(1)) || isnan(md_.camera_pos_(2)))
         return;
 
-    md_.lidar_proj_points_ = latest_cloud;
+    md_.lidar_proj_points_ = nonground_cloud;
 
-//  this->resetBuffer(md_.camera_pos_ - mp_.local_update_range_,
-//                    md_.camera_pos_ + mp_.local_update_range_);
+    posToIndex(md_.camera_pos_ - mp_.local_update_range_, md_.local_bound_min_);
+    posToIndex(md_.camera_pos_ + mp_.local_update_range_, md_.local_bound_max_);
+    boundIndex(md_.local_bound_min_);
+    boundIndex(md_.local_bound_max_);
+
+    for (int x = md_.local_bound_min_(0); x < md_.local_bound_max_(0); ++x)
+        for (int y = md_.local_bound_min_(1); y < md_.local_bound_max_(1); ++y)
+        {
+            md_.occupancy_2d_free_observed_[toAddress2d(x, y)] = 0;
+            for (int z = md_.local_bound_min_(2); z < md_.local_bound_max_(2); ++z)
+            {
+                md_.occupancy_buffer_inflate_segmentation_[toAddress(x, y, z)] = 0;
+            }
+        }
 
     pcl::PointXYZ pt;
     Eigen::Vector3d p3d, p3d_inf;
+    Eigen::Vector3i pt_idx;
 
     int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
     int inf_step_z = 1;
@@ -1182,12 +1213,24 @@ void GridMap::cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2C
     max_y = mp_.map_min_boundary_(1);
     max_z = mp_.map_min_boundary_(2);
 
-    //if(mp_.map_type_==PLANNING)
-    //{
-    //ROS_INFO("Point cloud num : %d",latest_cloud.points.size());
-    for (size_t i = 0; i < latest_cloud.points.size(); ++i)
+    for (size_t i = 0; i < ground_cloud.points.size(); ++i)
     {
-        pt = latest_cloud.points[i];
+        pt = ground_cloud.points[i];
+        p3d(0) = pt.x, p3d(1) = pt.y, p3d(2) = pt.z;
+
+        Eigen::Vector3d devi = p3d - md_.camera_pos_;
+        if (fabs(devi(0)) < mp_.local_update_range_(0) && fabs(devi(1)) < mp_.local_update_range_(1) &&
+            fabs(devi(2)) < mp_.local_update_range_(2))
+        {
+            posToIndex(p3d, pt_idx);
+            if (isInMap(pt_idx))
+                md_.occupancy_2d_free_observed_[toAddress2d(pt_idx(0), pt_idx(1))] = 1;
+        }
+    }
+
+    for (size_t i = 0; i < nonground_cloud.points.size(); ++i)
+    {
+        pt = nonground_cloud.points[i];
         p3d(0) = pt.x, p3d(1) = pt.y, p3d(2) = pt.z;
 
         /* point inside update range */
@@ -1227,9 +1270,6 @@ void GridMap::cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2C
         }
     }
 
-    boundIndex(md_.local_bound_min_);
-    boundIndex(md_.local_bound_max_);
-
     Eigen::Vector3i temp_idx;
     Eigen::Vector3i temp_pos;
     int count=0;
@@ -1245,10 +1285,22 @@ void GridMap::cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2C
 
                 if(z==(md_.local_bound_max_(2)-1))
                 {
+                    const int idx_2d = toAddress2d(x, y);
                     if(count>=1)
                     {
-                        md_.occupancy_buffer_inflate_2d_[toAddress2d(x,y)]=1;
+                        md_.occupancy_buffer_2d_[idx_2d] =
+                            min(mp_.segmentation_2d_clamp_max_log_,
+                                md_.occupancy_buffer_2d_[idx_2d] + mp_.segmentation_2d_prob_hit_log_);
                     }
+                    else if (md_.occupancy_2d_free_observed_[idx_2d] == 1)
+                    {
+                        md_.occupancy_buffer_2d_[idx_2d] =
+                            max(mp_.segmentation_2d_clamp_min_log_,
+                                md_.occupancy_buffer_2d_[idx_2d] + mp_.segmentation_2d_prob_miss_log_);
+                    }
+
+                    md_.occupancy_buffer_inflate_2d_[idx_2d] =
+                        md_.occupancy_buffer_2d_[idx_2d] >= mp_.segmentation_2d_min_occupancy_log_;
                     count =0;
                 }
             }

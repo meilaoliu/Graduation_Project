@@ -76,6 +76,11 @@ struct MappingParameters {
 
   /* local map update and clear */
   int local_map_margin_;
+  double segmentation_2d_p_hit_, segmentation_2d_p_miss_, segmentation_2d_p_min_,
+      segmentation_2d_p_max_, segmentation_2d_p_occ_;
+  double segmentation_2d_prob_hit_log_, segmentation_2d_prob_miss_log_,
+      segmentation_2d_clamp_min_log_, segmentation_2d_clamp_max_log_,
+      segmentation_2d_min_occupancy_log_;
 
   /* visualization and computation time display */
   double visualization_truncate_height_, virtual_ceil_height_, ground_height_;
@@ -91,9 +96,11 @@ struct MappingData {
   // main map data, occupancy of each voxel and Euclidean distance
 
   std::vector<double> occupancy_buffer_;
+  std::vector<double> occupancy_buffer_2d_;
   std::vector<char> occupancy_buffer_inflate_;
   std::vector<char> occupancy_buffer_inflate_2d_;
   std::vector<char> occupancy_buffer_inflate_segmentation_;
+  std::vector<char> occupancy_2d_free_observed_;
   std::vector<double> terrain_height_;
   std::vector<double> gradient_x_;
   std::vector<double> gradient_y_;
@@ -212,7 +219,8 @@ private:
                          const geometry_msgs::PoseStampedConstPtr& pose);
   void depthOdomCallback(const sensor_msgs::ImageConstPtr& img, const nav_msgs::OdometryConstPtr& odom);
   void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& img);
-  void cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2ConstPtr& cloud_segmentation);
+  void cloudSegmentationCallback_PLANNING(const sensor_msgs::PointCloud2ConstPtr& ground_segmentation,
+                                          const sensor_msgs::PointCloud2ConstPtr& nonground_segmentation);
   void cloudSegmentationCallback_EXPLORATION(const sensor_msgs::PointCloud2ConstPtr& cloud_segmentation);
   void odomCallback(const nav_msgs::OdometryConstPtr& odom);
 
@@ -239,15 +247,21 @@ private:
       SyncPolicyImageOdom;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, geometry_msgs::PoseStamped>
       SyncPolicyImagePose;
+  typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, sensor_msgs::PointCloud2>
+      SyncPolicyGroundNonground;
   typedef shared_ptr<message_filters::Synchronizer<SyncPolicyImagePose>> SynchronizerImagePose;
   typedef shared_ptr<message_filters::Synchronizer<SyncPolicyImageOdom>> SynchronizerImageOdom;
+  typedef shared_ptr<message_filters::Synchronizer<SyncPolicyGroundNonground>> SynchronizerGroundNonground;
 
   ros::NodeHandle node_;
   shared_ptr<message_filters::Subscriber<sensor_msgs::Image>> depth_sub_;
   shared_ptr<message_filters::Subscriber<geometry_msgs::PoseStamped>> pose_sub_;
   shared_ptr<message_filters::Subscriber<nav_msgs::Odometry>> odom_sub_;
+  shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> ground_segmentation_sub_;
+  shared_ptr<message_filters::Subscriber<sensor_msgs::PointCloud2>> nonground_segmentation_sub_;
   SynchronizerImagePose sync_image_pose_;
   SynchronizerImageOdom sync_image_odom_;
+  SynchronizerGroundNonground sync_ground_nonground_;
 
   ros::Subscriber indep_cloud_sub_, indep_odom_sub_,indep_cloud_segmentation_sub_;
   ros::Publisher map_pub_, map_inf_pub_,map_2d_pub_,terrain_height_pub_,map2d_pub_;

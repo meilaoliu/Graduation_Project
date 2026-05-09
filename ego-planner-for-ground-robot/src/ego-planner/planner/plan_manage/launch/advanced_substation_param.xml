@@ -164,6 +164,9 @@
     <param name="grid_map/local_update_range_z"  value="1.5" />
     <!--障碍物膨胀层-->
     <param name="grid_map/obstacles_inflation"     value="0.5" />
+    <param name="grid_map/segmentation_2d_p_hit" value="0.65" />
+    <param name="grid_map/segmentation_2d_p_miss" value="0.48" />
+    <param name="grid_map/segmentation_2d_p_occ" value="0.80" />
     <param name="grid_map/local_map_margin" value="2"/>
     <param name="grid_map/ground_height"        value="-0.01"/>
     <!-- camera parameter -->
