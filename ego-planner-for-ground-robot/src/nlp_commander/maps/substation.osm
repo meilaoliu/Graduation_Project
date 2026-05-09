@@ -32,7 +32,7 @@
     <tag k="device_type" v="low_voltage_room"/>
   </node>
 
-  <node id="6" lat="13" lon="-31">
+  <node id="6" lat="14.264678910823006" lon="-32.013562496969826">
     <tag k="name" v="高压配电区巡检点1"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="hv_switchgear"/>
@@ -50,25 +50,25 @@
     <tag k="device_type" v="hv_switchgear"/>
   </node>
 
-  <node id="9" lat="14" lon="-28">
+  <node id="9" lat="14.050431363060438" lon="-28.72843343127711">
     <tag k="name" v="变压器区1"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="transformer"/>
   </node>
 
-  <node id="10" lat="0.91" lon="-29">
+  <node id="10" lat="0.695667552527027" lon="-28.7998492805313">
     <tag k="name" v="变压器区2"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="transformer"/>
   </node>
 
-  <node id="11" lat="-11" lon="-28">
+  <node id="11" lat="-11.749767041910845" lon="-28.719618005085856">
     <tag k="name" v="变压器区3"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="transformer"/>
   </node>
 
-  <node id="12" lat="-17" lon="-30">
+  <node id="12" lat="-17.084322302913847" lon="-29.03245145711618">
     <tag k="name" v="插值点2"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
@@ -92,13 +92,13 @@
     <tag k="device_type" v="svg"/>
   </node>
 
-  <node id="16" lat="-25" lon="-1">
+  <node id="16" lat="-23.8642379274784" lon="-1.9928364732571637">
     <tag k="name" v="插值点3"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
   </node>
 
-  <node id="17" lat="-14" lon="-2">
+  <node id="17" lat="-14.592510376880735" lon="-2.3203905740089685">
     <tag k="name" v="35kv配电箱1"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="mv_switchgear"/>
@@ -122,19 +122,19 @@
     <tag k="device_type" v="waypoint"/>
   </node>
 
-  <node id="21" lat="-14" lon="6">
+  <node id="21" lat="-17.924167290078906" lon="7.997282326005621">
     <tag k="name" v="插值点5"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
   </node>
 
-  <node id="22" lat="-14" lon="8">
+  <node id="22" lat="-7.988049132974298" lon="7.997282326005621">
     <tag k="name" v="插值点6"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
   </node>
 
-  <node id="23" lat="4" lon="8">
+  <node id="23" lat="10.588171769438663" lon="8.105283610321974">
     <tag k="name" v="插值点7"/>
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
@@ -143,10 +143,8 @@
   <!-- 可通行拓扑边：每个 way 中相邻 nd 构成一条无向连接 -->
   <way id="101"><nd ref="1"/><nd ref="2"/><tag k="name" v="入口点-插值点1"/></way>
   <way id="102"><nd ref="2"/><nd ref="3"/><tag k="name" v="插值点1-低压配电室1"/></way>
-  <way id="103"><nd ref="2"/><nd ref="19"/><tag k="name" v="插值点1-35kv配电箱3"/></way>
   <way id="104"><nd ref="3"/><nd ref="4"/><tag k="name" v="低压配电室1-低压配电室2"/></way>
   <way id="105"><nd ref="4"/><nd ref="5"/><tag k="name" v="低压配电室2-低压配电室3"/></way>
-  <way id="106"><nd ref="3"/><nd ref="19"/><tag k="name" v="低压配电室1-35kv配电箱3"/></way>
   <way id="107"><nd ref="4"/><nd ref="9"/><tag k="name" v="低压配电室2-变压器区1"/></way>
   <way id="108"><nd ref="4"/><nd ref="6"/><tag k="name" v="低压配电室2-高压配电区巡检点1"/></way>
   <way id="109"><nd ref="5"/><nd ref="6"/><tag k="name" v="低压配电室3-高压配电区巡检点1"/></way>
@@ -161,7 +159,6 @@
   <way id="118"><nd ref="12"/><nd ref="13"/><tag k="name" v="插值点2-3SVG无功补偿区"/></way>
   <way id="119"><nd ref="13"/><nd ref="14"/><tag k="name" v="3SVG无功补偿区-2SVG无功补偿区"/></way>
   <way id="120"><nd ref="14"/><nd ref="15"/><tag k="name" v="2SVG无功补偿区-1SVG无功补偿区"/></way>
-  <way id="121"><nd ref="15"/><nd ref="17"/><tag k="name" v="1SVG无功补偿区-35kv配电箱1"/></way>
   <way id="123"><nd ref="13"/><nd ref="8"/><tag k="name" v="3SVG无功补偿区-高压配电区巡检点3"/></way>
   <way id="124"><nd ref="16"/><nd ref="17"/><tag k="name" v="插值点3-35kv配电箱1"/></way>
   <way id="125"><nd ref="16"/><nd ref="15"/><tag k="name" v="插值点3-1SVG无功补偿区"/></way>
@@ -171,5 +168,24 @@
   <way id="129"><nd ref="22"/><nd ref="23"/><tag k="name" v="插值点6-插值点7"/></way>
   <way id="130"><nd ref="23"/><nd ref="1"/><tag k="name" v="插值点7-入口点"/></way>
 
-</osm>
-
+<node id="24" lat="26.55399304161994" lon="-2.349034861988638">
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+    <tag k="name" v="新节点_24"/>
+  </node>
+  <way id="2000">
+    <nd ref="24"/>
+    <nd ref="19"/>
+    <tag k="name" v="新节点_24-35kv配电箱3"/>
+  </way>
+  <way id="2001">
+    <nd ref="24"/>
+    <nd ref="3"/>
+    <tag k="name" v="新节点_24-低压配电室1"/>
+  </way>
+  <way id="2002">
+    <nd ref="24"/>
+    <nd ref="2"/>
+    <tag k="name" v="新节点_24-插值点1"/>
+  </way>
+  </osm>

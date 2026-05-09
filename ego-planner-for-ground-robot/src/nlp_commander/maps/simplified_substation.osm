@@ -115,4 +115,9 @@
     <tag k="area" v="center"/>
     <tag k="device_type" v="waypoint"/>
   </node>
+  <node id="24">
+    <tag k="name" v="新节点_24"/>
+    <tag k="area" v="center"/>
+    <tag k="device_type" v="waypoint"/>
+  </node>
 </osm>
