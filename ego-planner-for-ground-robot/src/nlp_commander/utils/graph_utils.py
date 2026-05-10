@@ -277,13 +277,20 @@ class SubstationGraph:
         获取充电点信息。
 
         Args:
-            charge_point_name: 可选，指定充电点的节点名；为 None 则使用默认 "入口点"。
-                后续若新增独立充电点节点（如 "充电点"），传入该名即可，无需改其他代码。
+            charge_point_name: 可选，指定充电点的节点名；为 None 则优先使用地图中的
+                "充电口"/"充电点"，不存在时再回退到 "入口点"。
 
         Returns:
             (name, x, y) 三元组。若指定名不存在则回退到 "入口点"。
         """
-        name = charge_point_name or "入口点"
+        name = charge_point_name
+        if not name:
+            if "充电口" in self.locations:
+                name = "充电口"
+            elif "充电点" in self.locations:
+                name = "充电点"
+            else:
+                name = "入口点"
         coords = self.locations.get(name)
         if coords is None:
             # 回退到入口点

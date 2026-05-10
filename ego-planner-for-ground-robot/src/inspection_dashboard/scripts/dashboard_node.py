@@ -15,6 +15,7 @@ import base64
 import os
 import threading
 import time
+from xml.sax.saxutils import escape
 
 import rospy
 from std_msgs.msg import String
@@ -222,6 +223,103 @@ def _coord_eq(old_str, new_val):
         return False
 
 
+def _edge_name(edge, node_names):
+    """边不是语义实体，名称始终由两端节点自动生成。"""
+    a_name = node_names.get(str(edge.get('a')))
+    b_name = node_names.get(str(edge.get('b')))
+    if a_name and b_name:
+        return f'{a_name}-{b_name}'
+    return str(edge.get('name') or '')
+
+
+_OSM_TAG_ORDER = {
+    'name': 0,
+    'area': 1,
+    'zone': 2,
+    'role': 3,
+    'device_type': 4,
+    'description': 5,
+}
+
+
+def _osm_id_key(elem):
+    raw = elem.get('id') or ''
+    try:
+        return (0, int(raw))
+    except ValueError:
+        return (1, raw)
+
+
+def _ordered_tags(elem, simplified=False):
+    tags = []
+    for tag in elem.findall('tag'):
+        key = tag.get('k') or ''
+        if simplified and key not in _OSM_TAG_ORDER:
+            continue
+        tags.append((key, tag.get('v') or ''))
+    return sorted(tags, key=lambda item: (_OSM_TAG_ORDER.get(item[0], 100), item[0]))
+
+
+def _append_tag_lines(lines, elem, indent='    ', simplified=False):
+    for key, value in _ordered_tags(elem, simplified=simplified):
+        lines.append(f'{indent}<tag k="{escape(key)}" v="{escape(value)}"/>')
+
+
+def _serialize_full_osm(root):
+    nodes = sorted(root.findall('node'), key=_osm_id_key)
+    ways = sorted(root.findall('way'), key=_osm_id_key)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<osm version="0.6" generator="manual">',
+        '  <!-- 语义节点：node.x = lon, node.y = lat；节点代表设备、插值点、入口或充电口 -->',
+    ]
+    for node in nodes:
+        attrs = [f'id="{escape(node.get("id") or "")}"']
+        if node.get('lat') is not None:
+            attrs.append(f'lat="{escape(node.get("lat"))}"')
+        if node.get('lon') is not None:
+            attrs.append(f'lon="{escape(node.get("lon"))}"')
+        lines.append(f'  <node {" ".join(attrs)}>')
+        _append_tag_lines(lines, node)
+        lines.append('  </node>')
+    lines.append('')
+    lines.append('  <!-- 拓扑边：每个 way 中相邻 nd 构成一条无向可通行连接 -->')
+    for way in ways:
+        lines.append(f'  <way id="{escape(way.get("id") or "")}">')
+        for nd in way.findall('nd'):
+            lines.append(f'    <nd ref="{escape(nd.get("ref") or "")}"/>')
+        _append_tag_lines(lines, way)
+        lines.append('  </way>')
+    lines.append('</osm>')
+    return '\n'.join(lines) + '\n'
+
+
+def _serialize_simplified_osm(root):
+    nodes = sorted(root.findall('node'), key=_osm_id_key)
+    ways = sorted(root.findall('way'), key=_osm_id_key)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<osm version="0.6" generator="inspection_dashboard_simplified">',
+        '  <!-- 简化语义节点：不给 LLM 暴露坐标，仅保留可读语义标签 -->',
+    ]
+    for node in nodes:
+        lines.append(f'  <node id="{escape(node.get("id") or "")}">')
+        _append_tag_lines(lines, node, simplified=True)
+        lines.append('  </node>')
+    lines.append('')
+    lines.append('  <!-- 简化拓扑边：仅保留连通关系，不包含坐标几何 -->')
+    for way in ways:
+        lines.append(f'  <way id="{escape(way.get("id") or "")}">')
+        for nd in way.findall('nd'):
+            lines.append(f'    <nd ref="{escape(nd.get("ref") or "")}"/>')
+        for key, value in _ordered_tags(way):
+            if key == 'name':
+                lines.append(f'    <tag k="name" v="{escape(value)}"/>')
+        lines.append('  </way>')
+    lines.append('</osm>')
+    return '\n'.join(lines) + '\n'
+
+
 def _write_osm_payload(path, payload):
     """就地更新 osm：只改用户实际修改的 lat/lon/tag，最小化 diff。
 
@@ -243,6 +341,11 @@ def _write_osm_payload(path, payload):
     # 建索引（跳过 Comment）
     node_by_id = {n.get('id'): n for n in root.findall('node')}
     way_by_id = {w.get('id'): w for w in root.findall('way')}
+    node_names = {
+        str(n.get('id')): str(n.get('name'))
+        for n in nodes
+        if n.get('id') is not None and n.get('name')
+    }
 
     seen_node_ids = set()
     seen_way_ids = set()
@@ -281,15 +384,14 @@ def _write_osm_payload(path, payload):
         wid = str(ed['id'])
         seen_way_ids.add(wid)
         a = str(ed['a']); b = str(ed['b'])
-        name = str(ed['name']) if ed.get('name') else None
+        name = _edge_name(ed, node_names)
 
         elem = way_by_id.get(wid)
         if elem is None:
             elem = ET.SubElement(root, 'way', {'id': wid})
             ET.SubElement(elem, 'nd', {'ref': a})
             ET.SubElement(elem, 'nd', {'ref': b})
-            if name:
-                ET.SubElement(elem, 'tag', {'k': 'name', 'v': name})
+            ET.SubElement(elem, 'tag', {'k': 'name', 'v': name})
             _indent_inplace(elem, level=1)
         else:
             nds = elem.findall('nd')
@@ -303,25 +405,16 @@ def _write_osm_payload(path, payload):
                 ET.SubElement(elem, 'nd', {'ref': b})
                 for t in tags_keep:
                     elem.append(t)
-            if name:
-                _set_or_replace_tag(elem, 'name', name)
-                _remove_extra_tags(elem, {'name'})
-            else:
-                _remove_extra_tags(elem, set())
+            _set_or_replace_tag(elem, 'name', name)
+            _remove_extra_tags(elem, {'name'})
 
     for wid, elem in way_by_id.items():
         if wid not in seen_way_ids:
             root.remove(elem)
 
-    # 序列化：自己控制属性引号(") 和自闭合标签格式(<tag .../>)，匹配原文件风格
-    body = ET.tostring(root, encoding='unicode', short_empty_elements=True)
-    # ET 默认输出 ` />`（带空格），原文件是 `/>`（无空格） → 修正
-    body = body.replace(' />', '/>')
-    out = '<?xml version="1.0" encoding="UTF-8"?>\n' + body + '\n'
-
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(out)
+        f.write(_serialize_full_osm(root))
     os.replace(tmp, path)
     return True
 
@@ -344,9 +437,12 @@ def _simplified_osm_path(path):
 
 
 def _write_simplified_osm(path, payload):
-    """从带几何的 osm payload 生成简化版 (无 lat/lon, 无 way)，给 LLM 使用。"""
-    osm = ET.Element('osm', {'version': '0.6', 'generator': 'simplified'})
+    """从带几何的 osm payload 生成简化版：无坐标，但保留语义节点和拓扑边。"""
+    osm = ET.Element('osm', {'version': '0.6', 'generator': 'inspection_dashboard_simplified'})
+    node_names = {}
     for n in payload.get('nodes', []):
+        if n.get('id') is not None and n.get('name'):
+            node_names[str(n['id'])] = str(n['name'])
         e = ET.SubElement(osm, 'node', {'id': str(n['id'])})
         if n.get('name'):
             ET.SubElement(e, 'tag', {'k': 'name', 'v': str(n['name'])})
@@ -354,13 +450,16 @@ def _write_simplified_osm(path, payload):
             if k == 'name':
                 continue
             ET.SubElement(e, 'tag', {'k': str(k), 'v': str(v)})
-    _indent_inplace(osm, level=0)
-    body = ET.tostring(osm, encoding='unicode', short_empty_elements=True)
-    body = body.replace(' />', '/>')
-    out = '<?xml version="1.0" encoding="UTF-8"?>\n' + body + '\n'
+    if payload.get('edges'):
+        osm.append(ET.Comment(' 简化拓扑边：仅保留连通关系，不包含坐标几何 '))
+    for ed in payload.get('edges', []):
+        w = ET.SubElement(osm, 'way', {'id': str(ed['id'])})
+        ET.SubElement(w, 'nd', {'ref': str(ed['a'])})
+        ET.SubElement(w, 'nd', {'ref': str(ed['b'])})
+        ET.SubElement(w, 'tag', {'k': 'name', 'v': _edge_name(ed, node_names)})
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(out)
+        f.write(_serialize_simplified_osm(osm))
     os.replace(tmp, path)
 
 
@@ -504,6 +603,7 @@ def api_map_archives_delete():
 
 
 
+@app.route('/api/map/restore', methods=['POST'])
 def api_map_restore():
     body = request.get_json(silent=True) or {}
     name = body.get('name', '')
@@ -561,6 +661,17 @@ _BASEMAP_DEFAULT = {
 }
 
 
+def _basemap_first_local_file():
+    if not os.path.isdir(_BASEMAP_DIR):
+        return ''
+    for name in sorted(os.listdir(_BASEMAP_DIR)):
+        if name.startswith('_'):
+            continue
+        if name.lower().endswith(_BASEMAP_EXTS):
+            return name
+    return ''
+
+
 def _basemap_load_cfg():
     cfg = dict(_BASEMAP_DEFAULT)
     try:
@@ -568,6 +679,10 @@ def _basemap_load_cfg():
             with open(_BASEMAP_CFG, 'r', encoding='utf-8') as f:
                 user = _json.load(f) or {}
             cfg.update({k: user[k] for k in cfg.keys() if k in user})
+        elif not cfg.get('src'):
+            first = _basemap_first_local_file()
+            if first:
+                cfg.update({'enabled': True, 'source': 'local', 'src': first})
     except Exception as e:
         rospy.logwarn(f"[dashboard] basemap config load failed: {e}")
     return cfg

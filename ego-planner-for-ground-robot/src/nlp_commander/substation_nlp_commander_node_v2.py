@@ -109,6 +109,9 @@ class SubstationNlpCommanderV2:
             self.intent_normalizer = IntentNormalizer(
                 self.path_planner.graph.get_all_locations().keys()
             )
+            if hasattr(self, "agent_runtime") and hasattr(self.agent_runtime, "action_executor"):
+                charge_name, _, _ = self.path_planner.graph.get_charge_point()
+                self.agent_runtime.action_executor.charge_point_name = charge_name
             msg = (f"地图已重新加载 (来源={'OSM' if used_osm else '内置'}, "
                    f"节点={n_nodes}, 边={n_edges})")
             rospy.loginfo("[reload_map] " + msg)
@@ -277,11 +280,12 @@ class SubstationNlpCommanderV2:
         ]
         route_policy = route_policy or {}
         if task_type == "go_charge" and self.segment_scheduler is not None:
+            charge_name, _, _ = self.path_planner.graph.get_charge_point()
             result = self.segment_scheduler.start_charge_task(start_name=current_pos, reason="user_go_charge")
-            planned_path = self.path_planner.plan_path_to_single_target(current_pos, "入口点") or [current_pos, "入口点"]
+            planned_path = self.path_planner.plan_path_to_single_target(current_pos, charge_name) or [current_pos, charge_name]
             result += f"\n📏 路径总距离: {self.path_planner.get_path_distance(planned_path):.1f}米"
             result += f"\n🛣️ 详细路径: {' → '.join(planned_path)}"
-            result += "\n🛑 停留点: 入口点"
+            result += f"\n🛑 停留点: {charge_name}"
             return result
 
         # 智能分析航点序列，确定最佳路径规划策略
@@ -554,7 +558,11 @@ class SubstationNlpCommanderV2:
         rospy.loginfo(f"分析任务: 描述='{task_description}', 航点={waypoint_sequence}")
         normalized_task_type = (task_type or "").strip()
 
-        if normalized_task_type in {"return_home", "go_home", "return_to_base", "charge", "go_charge"}:
+        if normalized_task_type in {"charge", "go_charge"}:
+            charge_name, _, _ = self.path_planner.graph.get_charge_point()
+            return {"type": "single_target", "targets": [charge_name]}
+
+        if normalized_task_type in {"return_home", "go_home", "return_to_base"}:
             return {"type": "single_target", "targets": ["入口点"]}
 
         if normalized_task_type in {"single_target", "area_inspection", "full_inspection", "custom_path"}:

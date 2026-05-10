@@ -19,6 +19,9 @@ const edgeById = new Map();
 // rot is clockwise degrees ∈ {0, 90, 180, 270}. Default 90 (matches physical site layout).
 const view = { cx: 0, cy: 0, scale: 8, rot: 90 };
 let dirty = false;
+let undoStack = [];
+let redoStack = [];
+const MAX_HISTORY = 100;
 
 let selectedNode = null;   // node object
 let selectedEdge = null;
@@ -37,6 +40,46 @@ function setStatus(text, kind = '') {
 function markDirty() {
   dirty = true;
   setStatus('● 有未保存修改', 'err');
+}
+function snapshot() {
+  return JSON.stringify({ nodes: DATA.nodes, edges: DATA.edges });
+}
+function restoreSnapshot(s) {
+  const state = JSON.parse(s);
+  DATA.nodes = state.nodes || [];
+  DATA.edges = state.edges || [];
+  selectedNode = null;
+  selectedEdge = null;
+  rebuildIndex();
+  clearSelection();
+  render();
+  updateHistoryButtons();
+}
+function pushUndo() {
+  undoStack.push(snapshot());
+  if (undoStack.length > MAX_HISTORY) undoStack.shift();
+  redoStack = [];
+  updateHistoryButtons();
+}
+function updateHistoryButtons() {
+  const undoBtn = $('btn-undo');
+  const redoBtn = $('btn-redo');
+  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+}
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(snapshot());
+  restoreSnapshot(undoStack.pop());
+  dirty = true;
+  setStatus('↶ 已撤销，尚未保存', 'err');
+}
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(snapshot());
+  restoreSnapshot(redoStack.pop());
+  dirty = true;
+  setStatus('↷ 已恢复，尚未保存', 'err');
 }
 
 function bbox() {
@@ -99,6 +142,9 @@ async function loadMap() {
   nextEdgeId = Math.max(me + 1, 2000);
 
   rebuildIndex();
+  undoStack = [];
+  redoStack = [];
+  updateHistoryButtons();
   // 等 SVG 真正有尺寸再 fit (首次加载时 layout 可能还没完成)
   await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
   fitView();
@@ -113,8 +159,24 @@ function rebuildIndex() {
   DATA.edges.forEach((e) => edgeById.set(String(e.id), e));
 }
 
+function edgeName(e) {
+  const a = nodeById.get(String(e.a));
+  const b = nodeById.get(String(e.b));
+  return a && b ? `${a.name}-${b.name}` : (e.name || '');
+}
+
+function normalizeEdgeNames() {
+  DATA.edges.forEach((e) => { e.name = edgeName(e); });
+}
+
+function isInterpolationNode(n) {
+  const tags = n && n.tags ? n.tags : {};
+  return tags.device_type === 'waypoint' || tags.role === 'transit';
+}
+
 async function saveMap() {
   setStatus('保存中...', '');
+  normalizeEdgeNames();
   const body = {
     osm_path: DATA.osm_path,
     nodes: DATA.nodes,
@@ -132,6 +194,7 @@ async function saveMap() {
     if (j.reload)     parts.push(j.reload.ok ? 'NLP热加载✓' : 'NLP热加载✗(' + (j.reload.msg||'') + ')');
     setStatus(parts.join(' · '), 'ok');
     dirty = false;
+    updateHistoryButtons();
   } else {
     setStatus('保存失败: ' + (j.error || r.status), 'err');
   }
@@ -223,6 +286,7 @@ function render() {
     let cls = 'node-circle';
     if (n.tags && n.tags.area) cls += ' area-' + n.tags.area;
     if (n.tags && n.tags.device_type) cls += ' dev-' + n.tags.device_type;
+    if (n.tags && n.tags.role) cls += ' role-' + n.tags.role;
     if (selectedNode && selectedNode.id === n.id) cls += ' selected';
     if (armedAddEdge && edgePickFirst && edgePickFirst.id === n.id) cls += ' armed';
     c.setAttribute('class', cls);
@@ -277,9 +341,17 @@ function showNodeForm(n) {
   $('nf-name').value = n.name;
   $('nf-x').value = n.x.toFixed(2);
   $('nf-y').value = n.y.toFixed(2);
+  const tags = n.tags || {};
+  $('nf-device-type').value = tags.device_type || '';
+  $('nf-role').value = tags.role || '';
+  $('nf-area').value = tags.area || '';
+  $('nf-zone').value = tags.zone || '';
+  $('nf-description').value = tags.description || '';
   const tagsBox = $('nf-tags');
   tagsBox.innerHTML = '';
-  Object.entries(n.tags || {}).forEach(([k, v]) => addTagRow(k, v));
+  Object.entries(tags)
+    .filter(([k]) => !['device_type', 'role', 'area', 'zone', 'description'].includes(k))
+    .forEach(([k, v]) => addTagRow(k, v));
 }
 function addTagRow(k = '', v = '') {
   const row = document.createElement('div');
@@ -300,34 +372,55 @@ function showEdgeForm(e) {
   const b = nodeById.get(String(e.b));
   $('ef-a').value = a ? `${e.a} (${a.name})` : e.a;
   $('ef-b').value = b ? `${e.b} (${b.name})` : b;
-  $('ef-name').value = e.name || '';
 }
 
 $('nf-add-tag').addEventListener('click', () => addTagRow());
 $('node-form').addEventListener('submit', (ev) => {
   ev.preventDefault();
   if (!selectedNode) return;
-  selectedNode.name = $('nf-name').value.trim();
+  const wasInterpolation = isInterpolationNode(selectedNode);
+  pushUndo();
+  let nextName = $('nf-name').value.trim();
   selectedNode.x = parseFloat($('nf-x').value) || 0;
   selectedNode.y = parseFloat($('nf-y').value) || 0;
   const tags = {};
+  [
+    ['device_type', $('nf-device-type').value.trim()],
+    ['role', $('nf-role').value.trim()],
+    ['area', $('nf-area').value.trim()],
+    ['zone', $('nf-zone').value.trim()],
+    ['description', $('nf-description').value.trim()],
+  ].forEach(([k, v]) => {
+    if (v || k === 'description') tags[k] = v;
+  });
   $('nf-tags').querySelectorAll('.tag-row').forEach((row) => {
     const ins = row.querySelectorAll('input');
     const k = ins[0].value.trim();
     const v = ins[1].value.trim();
     if (k) tags[k] = v;
   });
+  if (tags.role === 'charge_point' && tags.device_type === 'waypoint') {
+    tags.device_type = 'charge_point';
+  }
+  const shouldBeInterpolation = tags.role === 'transit' || (!tags.role && tags.device_type === 'waypoint');
+  if (shouldBeInterpolation) {
+    tags.device_type = 'waypoint';
+    tags.role = 'transit';
+    if (!tags.zone) tags.zone = '通行连接区';
+    if (tags.description === undefined) tags.description = '';
+  }
   selectedNode.tags = tags;
+  if (shouldBeInterpolation && (!wasInterpolation || !/^插值点\d+$/.test(nextName))) {
+    nextName = nextInterpolationName(selectedNode.id);
+  }
+  selectedNode.name = nextName;
+  $('nf-name').value = selectedNode.name;
+  normalizeEdgeNames();
   markDirty();
   render();
 });
-$('edge-form').addEventListener('submit', (ev) => {
-  ev.preventDefault();
-  if (!selectedEdge) return;
-  selectedEdge.name = $('ef-name').value.trim();
-  markDirty();
-  render();
-});
+$('nf-delete').addEventListener('click', deleteSelected);
+$('ef-delete').addEventListener('click', deleteSelected);
 
 // ---------- node drag & pan/zoom ----------
 let dragging = null;     // {node, startMouse, startWorld}
@@ -338,7 +431,10 @@ function onNodeMouseDown(ev, n, g) {
   if (armedAddEdge) return;          // 不在选边模式时才允许拖
   ev.stopPropagation();
   ev.preventDefault();
-  dragging = { node: n, g };
+  selectedNode = n;
+  selectedEdge = null;
+  showNodeForm(n);
+  dragging = { node: n, g, x0: n.x, y0: n.y };
   g.classList.add('dragging');
 }
 
@@ -369,7 +465,17 @@ svg.addEventListener('mousemove', (ev) => {
 svg.addEventListener('mouseup', (ev) => {
   if (dragging) {
     dragging.g.classList.remove('dragging');
-    markDirty();
+    const x1 = dragging.node.x;
+    const y1 = dragging.node.y;
+    if (Math.abs(x1 - dragging.x0) > 1e-9 ||
+        Math.abs(y1 - dragging.y0) > 1e-9) {
+      dragging.node.x = dragging.x0;
+      dragging.node.y = dragging.y0;
+      pushUndo();
+      dragging.node.x = x1;
+      dragging.node.y = y1;
+      markDirty();
+    }
     dragging = null;
     render();
   }
@@ -444,12 +550,24 @@ function newEdgeId(taken) {
   nextEdgeId = i + 1;
   return String(i);
 }
+function nextInterpolationName(excludeId = null) {
+  const used = new Set();
+  DATA.nodes.forEach((n) => {
+    if (excludeId !== null && String(n.id) === String(excludeId)) return;
+    const m = String(n.name || '').match(/^插值点(\d+)$/);
+    if (m) used.add(parseInt(m[1], 10) || 0);
+  });
+  let candidate = 1;
+  while (used.has(candidate)) candidate += 1;
+  return `插值点${candidate}`;
+}
 
 function addNodeAt(x, y) {
+  pushUndo();
   const id = newId(nodeById);
   const n = {
-    id, name: '新节点_' + id, x, y,
-    tags: { area: 'center', device_type: 'waypoint' },
+    id, name: nextInterpolationName(), x, y,
+    tags: { area: 'center', device_type: 'waypoint', role: 'transit', description: '' },
   };
   DATA.nodes.push(n);
   nodeById.set(id, n);
@@ -480,6 +598,7 @@ function handleEdgePick(n) {
     return;
   }
   const id = newEdgeId(edgeById);
+  pushUndo();
   const e = {
     id, a: edgePickFirst.id, b: n.id,
     name: `${edgePickFirst.name}-${n.name}`,
@@ -499,11 +618,26 @@ function cancelArmedEdge() {
 }
 
 document.addEventListener('keydown', (ev) => {
+  const tag = (ev.target && ev.target.tagName || '').toLowerCase();
+  const editing = ['input', 'select', 'textarea'].includes(tag);
   if (ev.key === 'Escape') cancelArmedEdge();
-  if (ev.key === 'Delete' && (selectedNode || selectedEdge)) deleteSelected();
+  if (!editing && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+    ev.preventDefault();
+    if (ev.shiftKey) redo(); else undo();
+  }
+  if (!editing && (ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'y') {
+    ev.preventDefault();
+    redo();
+  }
+  if (!editing && (ev.key === 'Delete' || ev.key === 'Backspace') && (selectedNode || selectedEdge)) {
+    ev.preventDefault();
+    deleteSelected();
+  }
 });
 
 function deleteSelected() {
+  if (!selectedNode && !selectedEdge) return;
+  pushUndo();
   if (selectedEdge) {
     DATA.edges = DATA.edges.filter((e) => e.id !== selectedEdge.id);
     edgeById.delete(selectedEdge.id);
@@ -547,6 +681,10 @@ document.querySelectorAll('#map-toolbar button').forEach((btn) => {
       render();
     } else if (act === 'delete') {
       deleteSelected();
+    } else if (act === 'undo') {
+      undo();
+    } else if (act === 'redo') {
+      redo();
     } else if (act === 'fit') {
       fitView(); render();
     } else if (act === 'rotate') {

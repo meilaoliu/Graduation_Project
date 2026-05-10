@@ -23,6 +23,8 @@
   <button data-act="add-here">+ 用机器人当前位置添加</button>
   <button data-act="add-edge" id="btn-add-edge">— 添加边 (依次点两个节点)</button>
   <button data-act="delete" id="btn-delete">🗑 删除选中</button>
+  <button data-act="undo" id="btn-undo" disabled>↶ 撤销</button>
+  <button data-act="redo" id="btn-redo" disabled>↷ 恢复</button>
   <button data-act="fit">⤢ 适应窗口</button>
   <button data-act="rotate" title="顺时针旋转视图 90°">⟳ 旋转 90°</button>
   <button data-act="save" class="primary">💾 保存到 OSM 文件</button>
@@ -52,20 +54,34 @@
       <label>名称 <input id="nf-name" required /></label>
       <label>X (lon) <input id="nf-x" type="number" step="0.01" /></label>
       <label>Y (lat) <input id="nf-y" type="number" step="0.01" /></label>
+      <label>设备类型 / device_type <input id="nf-device-type" placeholder="waypoint / svg / transformer ..." /></label>
+      <label>角色 / role
+        <select id="nf-role">
+          <option value="">未设置</option>
+          <option value="entry">entry 起点/入口</option>
+          <option value="transit">transit 中间通行点</option>
+          <option value="inspection_target">inspection_target 巡检目标</option>
+          <option value="charge_point">charge_point 充电点</option>
+        </select>
+      </label>
+      <label>粗略方位 / area <input id="nf-area" placeholder="east / center / west" /></label>
+      <label>业务区域 / zone <input id="nf-zone" placeholder="如 SVG无功补偿区 / 35kV配电区" /></label>
+      <label>描述 / description <textarea id="nf-description" rows="3" placeholder="给大模型看的自然语言说明；插值点可留空"></textarea></label>
       <fieldset>
-        <legend>标签 (k=v)</legend>
+        <legend>其他标签 (k=v)</legend>
         <div id="nf-tags"></div>
         <button type="button" id="nf-add-tag">+ 新增标签</button>
       </fieldset>
       <button type="submit" class="primary">应用修改</button>
+      <button type="button" id="nf-delete" class="danger">删除此节点</button>
     </form>
 
     <form id="edge-form" style="display:none">
       <label>ID <input id="ef-id" disabled /></label>
       <label>起点 <input id="ef-a" disabled /></label>
       <label>终点 <input id="ef-b" disabled /></label>
-      <label>名称 <input id="ef-name" /></label>
-      <button type="submit" class="primary">应用修改</button>
+      <p class="hint-text">边只表示拓扑连通关系，不编辑语义属性；保存时名称自动由两端节点生成。</p>
+      <button type="button" id="ef-delete" class="danger">删除此边</button>
     </form>
 
     <details id="basemap-section">

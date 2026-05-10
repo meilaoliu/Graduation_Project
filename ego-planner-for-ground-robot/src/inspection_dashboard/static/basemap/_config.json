@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "source": "local",
+  "src": "topdown.png",
+  "cx": -2.13,
+  "cy": -1.843,
+  "world_width": 90.5,
+  "rotation": -90,
+  "opacity": 0.55
+}

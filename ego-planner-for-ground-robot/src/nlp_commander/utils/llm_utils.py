@@ -141,15 +141,19 @@ class LLMClient:
 你的职责是：阅读变电站的拓扑语义地图与用户的自然语言指令，
 推理出应该巡检哪些设备、属于哪一类巡检任务，并给出结构化的 JSON 输出。
 
-【地图说明（简化 OSM 文本，仅保留语义标签）】
+【地图说明（简化 OSM 文本，保留语义标签和拓扑连通关系）】
 下面是一份经过简化处理的变电站拓扑语义地图，采用 OpenStreetMap XML 格式表示。
 其中：
 - 每个 <node> 代表一个设备或中间航点，包含：
   - name: 设备名称（与你需要输出的名称完全一致）
-  - area: 所属区域（east/center/west）
+  - area: 粗略布局方位（east/center/west），只作为辅助提示，不一定等同真实业务分区
+  - zone: 可选业务区域描述（如 SVG无功补偿区、35kV配电区），比 area 更适合理解用户说的区域
+  - role: 可选节点角色（entry/transit/inspection_target/charge_point）
   - device_type: 设备类型（如 entry、low_voltage_room、hv_switchgear、transformer、svg、mv_switchgear、waypoint）
+  - description: 可选自然语言说明；插值点/通行点可能为空
+- 每个 <way> 代表两个节点之间可通行的拓扑连接，供系统侧 Dijkstra 路径规划参考。
 
-请仔细阅读该地图文本，并在推理时充分利用其中的语义和区域信息。
+请仔细阅读该地图文本，并在推理时优先利用 name、device_type、zone、role、description 等语义信息；area 只能作为粗略方位辅助。
 
 <地图开始>
 {osm_text}
@@ -226,9 +230,9 @@ class LLMClient:
 
 其中：
 - targets 中的 name 必须来自地图中的设备名称，且尽量与用户指令语义对齐。
-- targets 只输出真实巡检设备，不要输出 device_type 为 waypoint 的中间航点；中间路径由 Dijkstra 自动补全。
+- targets 只输出真实巡检设备，不要输出 device_type 为 waypoint 或 role 为 transit 的中间航点；中间路径由 Dijkstra 自动补全。
 - 只有当某一阶段的唯一目的就是回到入口、起点或返航待命时，该阶段 task_type 才输出 return_home，targets 输出入口点，并将入口点的 photo_required 设为 false。
-- 当用户明确说“返回充电、去充电、回充电口充电、返航充电”时，该阶段 task_type 输出 go_charge，targets 输出入口点，并将入口点的 photo_required 设为 false；go_charge 表示到达入口点后调用充电流程，不等同于普通 return_home。
+- 当用户明确说“返回充电、去充电、回充电口充电、返航充电”时，该阶段 task_type 输出 go_charge，targets 优先输出 role 或 device_type 为 charge_point 的充电节点（例如“充电口”），并将 photo_required 设为 false；go_charge 表示到达充电点后调用充电流程，不等同于普通 return_home。
 - 如果用户说“巡检A后回到起点”，不要把整个任务输出成 return_home；应输出多阶段任务，先巡检A，再增加一个 return_home 阶段。
 - priority 为正整数，数值越小说明优先级越高。
 - 当用户要求完整巡检时，可以将所有设备点都列入 targets，并按合理顺序排序。

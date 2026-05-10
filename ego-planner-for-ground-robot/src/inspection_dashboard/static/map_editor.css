@@ -25,6 +25,14 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
   transition: background 140ms ease, border-color 140ms ease;
 }
 #map-toolbar button:hover { background: var(--surface-3); border-color: var(--ink-3); }
+#map-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#map-toolbar button:disabled:hover {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
 #map-toolbar button.primary {
   background: var(--accent); color: oklch(20% 0.04 78);
   border-color: oklch(70% 0.16 78);
@@ -103,6 +111,7 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
 .node-circle.dev-entry        { fill: var(--ok);   }
 .node-circle.dev-waypoint     { fill: oklch(55% 0.012 220); }
 .node-circle.dev-charge_point { fill: var(--accent); }
+.node-circle.role-charge_point { fill: var(--accent); }
 
 .node-circle.selected { stroke: var(--accent); stroke-width: 2.5; }
 .node-circle.armed    { stroke: var(--info);   stroke-width: 2.5; }
@@ -150,14 +159,15 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
   font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--ink-3); font-weight: 500;
 }
-#side-panel input, #side-panel select {
+#side-panel input, #side-panel select, #side-panel textarea {
   background: var(--surface-2); color: var(--ink-1);
   border: 1px solid var(--line); border-radius: var(--r-sm);
   padding: 7px 9px;
   font: 400 13px var(--font-mono);
   transition: border-color 140ms ease;
 }
-#side-panel input:focus {
+#side-panel textarea { resize: vertical; min-height: 62px; }
+#side-panel input:focus, #side-panel select:focus, #side-panel textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px oklch(80% 0.16 78 / 0.18);
@@ -169,6 +179,16 @@ body.editor-page > #map-main  { flex: 1 1 auto; min-height: 0; }
   letter-spacing: 0.02em;
 }
 #side-panel button.primary:hover { filter: brightness(1.08); }
+#side-panel button.danger {
+  padding: 9px;
+  background: oklch(35% 0.10 25);
+  color: var(--ink-1);
+  border: 1px solid oklch(45% 0.14 25);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font: 600 13px var(--font-ui);
+}
+#side-panel button.danger:hover { background: oklch(42% 0.14 25); }
 #side-panel fieldset {
   border: 1px solid var(--line-soft); border-radius: var(--r-sm);
   padding: 8px;
