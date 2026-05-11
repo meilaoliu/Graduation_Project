@@ -13,7 +13,6 @@
    -->
 
   <arg name="realistic"            default="true"/>
-  <arg name="use_global_traj"      default="true"/>
   <arg name="initial_battery"      default="30.0"/>
   <arg name="low_battery_threshold" default="20.0"/>
   <arg name="dashboard_port"       default="5000"/>
@@ -57,7 +56,6 @@
 
   <!-- 6) 自然语言指令调度器（含分段全局轨迹 + 低电返航） -->
   <include file="$(find nlp_commander)/launch/nlp_commander.launch">
-    <arg name="use_global_traj"        value="$(arg use_global_traj)"/>
     <arg name="dwell_seconds"          value="$(arg dwell_seconds)"/>
     <arg name="segment_done_timeout"   value="$(arg segment_done_timeout)"/>
     <arg name="enable_progress_monitor" value="$(arg enable_progress_monitor)"/>

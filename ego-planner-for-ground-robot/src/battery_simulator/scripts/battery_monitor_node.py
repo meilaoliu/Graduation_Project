@@ -20,7 +20,9 @@ battery_monitor_node
 """
 
 import math
+import os
 import threading
+import xml.etree.ElementTree as ET
 
 import rospy
 from std_msgs.msg import Header, Bool
@@ -55,6 +57,8 @@ class BatteryMonitor:
         self.charge_x = float(rospy.get_param('~charge_x', 9.0))
         self.charge_y = float(rospy.get_param('~charge_y', 27.0))
         self.charge_radius = float(rospy.get_param('~charge_radius', 1.0))
+        self.charge_point_name = rospy.get_param('~charge_point_name', '')
+        self.charge_osm_path = rospy.get_param('~charge_osm_path', '')
 
         self.pct = self.initial_pct
         self.charging = False
@@ -83,6 +87,52 @@ class BatteryMonitor:
 
         rospy.loginfo("[battery] init pct=%.1f, base=%.4f%%/s, k_v=%.3f, k_w=%.3f, photo=%.2f%%",
                       self.pct, self.base_rate, self.k_v, self.k_w, self.photo_cost)
+
+    def _default_osm_path(self):
+        try:
+            import rospkg
+            return os.path.join(rospkg.RosPack().get_path('nlp_commander'), 'maps', 'substation.osm')
+        except Exception:
+            here = os.path.dirname(os.path.abspath(__file__))
+            return os.path.abspath(os.path.join(here, '..', '..', 'nlp_commander', 'maps', 'substation.osm'))
+
+    def _resolve_charge_xy(self):
+        path = self.charge_osm_path or self._default_osm_path()
+        if not path or not os.path.exists(path):
+            return self.charge_x, self.charge_y
+
+        try:
+            root = ET.parse(path).getroot()
+        except Exception as e:
+            rospy.logwarn("[battery] failed to parse charge osm %s: %s", path, e)
+            return self.charge_x, self.charge_y
+
+        named_candidates = {}
+        role_candidate = None
+        for node in root.findall('node'):
+            lat = node.get('lat')
+            lon = node.get('lon')
+            if lat is None or lon is None:
+                continue
+            tags = {tag.get('k'): tag.get('v') for tag in node.findall('tag')}
+            name = tags.get('name', '')
+            try:
+                xy = (float(lon), float(lat))
+            except ValueError:
+                continue
+            if name:
+                named_candidates[name] = xy
+            if tags.get('role') == 'charge_point' or tags.get('device_type') == 'charge_point':
+                role_candidate = xy
+
+        if self.charge_point_name and self.charge_point_name in named_candidates:
+            return named_candidates[self.charge_point_name]
+        if role_candidate is not None:
+            return role_candidate
+        for name in ('充电口', '充电点', '入口点'):
+            if name in named_candidates:
+                return named_candidates[name]
+        return self.charge_x, self.charge_y
 
     def odom_cb(self, msg: Odometry):
         p = msg.pose.pose.position
@@ -154,7 +204,8 @@ class BatteryMonitor:
             if self.enforce_charge_location:
                 if self.current_xy is None:
                     return TriggerResponse(success=False, message="charge rejected: odom unavailable")
-                distance = math.hypot(self.current_xy[0] - self.charge_x, self.current_xy[1] - self.charge_y)
+                charge_x, charge_y = self._resolve_charge_xy()
+                distance = math.hypot(self.current_xy[0] - charge_x, self.current_xy[1] - charge_y)
                 if distance > self.charge_radius:
                     return TriggerResponse(
                         success=False,

@@ -51,25 +51,15 @@ class SubstationNlpCommanderV2:
         rospy.Subscriber('/chat_in', String, self._chat_in_cb, queue_size=20)
         rospy.Service('/reload_map', Trigger, self._handle_reload_map)
         
-        # 设置回调函数
-        self.waypoint_manager.set_callbacks(
-            on_waypoint_reached=self.on_waypoint_reached,
-            on_task_completed=self.on_task_completed
+        if SegmentScheduler is None:
+            raise RuntimeError("SegmentScheduler 不可用，无法启动分段全局轨迹调度")
+        self.segment_scheduler = SegmentScheduler(
+            graph=self.path_planner.graph,
+            get_current_xy=self.waypoint_manager.get_current_coordinates,
+            say=lambda m: self._say(m),
+            on_event=self._on_runtime_event,
         )
-
-        # 全局轨迹分段调度器 (新流程)
-        self.use_global_traj = bool(rospy.get_param('~use_global_traj', True))
-        if self.use_global_traj and SegmentScheduler is not None:
-            self.segment_scheduler = SegmentScheduler(
-                graph=self.path_planner.graph,
-                get_current_xy=self.waypoint_manager.get_current_coordinates,
-                say=lambda m: self._say(m),
-                on_event=self._on_runtime_event,
-            )
-            rospy.loginfo("已启用全局轨迹分段调度模式 (use_global_traj=True)")
-        else:
-            self.segment_scheduler = None
-            rospy.loginfo("使用经典逐航点导航模式 (use_global_traj=False)")
+        rospy.loginfo("已启用全局轨迹分段调度模式")
 
         self.agent_runtime = TaskAgentRuntime(
             path_planner=self.path_planner,
@@ -228,14 +218,6 @@ class SubstationNlpCommanderV2:
             parts.append("Agent世界模型:\n" + self.agent_runtime.world_model.to_prompt_context(max_events=8))
         return "\n".join(parts) if parts else "无"
     
-    def on_waypoint_reached(self, waypoint_name: str):
-        """航点到达回调"""
-        self._say(f"✅ 已到达设备点: {waypoint_name}")
-    
-    def on_task_completed(self):
-        """任务完成回调"""
-        self._say("🎉 巡检任务完成！准备接收新指令...")
-    
     def handle_navigation_request(
         self,
         waypoint_sequence: list,
@@ -279,7 +261,7 @@ class SubstationNlpCommanderV2:
             for name in waypoint_sequence
         ]
         route_policy = route_policy or {}
-        if task_type == "go_charge" and self.segment_scheduler is not None:
+        if task_type == "go_charge":
             charge_name, _, _ = self.path_planner.graph.get_charge_point()
             result = self.segment_scheduler.start_charge_task(start_name=current_pos, reason="user_go_charge")
             planned_path = self.path_planner.plan_path_to_single_target(current_pos, charge_name) or [current_pos, charge_name]
@@ -381,21 +363,15 @@ class SubstationNlpCommanderV2:
             include_start_target=include_start_target,
         )
 
-        # 启动导航任务（按模式分支）
-        if self.segment_scheduler is not None:
-            # 解析 (name, (x,y), stop) 元组列表
-            wp_tuples = []
-            for name, stop, photo in zip(planned_path, stop_flags, photo_flags):
-                coords = self.path_planner.graph.get_location_coordinates(name)
-                if coords is None:
-                    continue
-                wp_tuples.append((name, coords, stop, photo))
-            if not wp_tuples:
-                return f"❌ 无法解析任何航点坐标: {planned_path}"
-            result = self.segment_scheduler.start_task(wp_tuples, task_description, scheduler_execution_options)
-        else:
-            result = self.waypoint_manager.start_navigation_task(
-                planned_path, task_description, stop_flags)
+        wp_tuples = []
+        for name, stop, photo in zip(planned_path, stop_flags, photo_flags):
+            coords = self.path_planner.graph.get_location_coordinates(name)
+            if coords is None:
+                continue
+            wp_tuples.append((name, coords, stop, photo))
+        if not wp_tuples:
+            return f"❌ 无法解析任何航点坐标: {planned_path}"
+        result = self.segment_scheduler.start_task(wp_tuples, task_description, scheduler_execution_options)
         
         # 添加路径信息
         result += f"\n📏 路径总距离: {path_distance:.1f}米"
@@ -799,14 +775,17 @@ class SubstationNlpCommanderV2:
     def show_status(self):
         """显示系统状态"""
         status = self.waypoint_manager.get_current_status()
+        scheduler_status = self.segment_scheduler.status() if self.segment_scheduler is not None else {}
+        scheduler_active = bool(scheduler_status.get("active"))
         print("📊 系统状态:")
         print(f"  📍 当前位置: {status['current_position']}")
-        print(f"  🎯 任务状态: {'执行中' if status['task_active'] else '空闲'}")
-        print(f"  📋 剩余航点: {status['remaining_waypoints']}")
-        if status['current_target']:
-            print(f"  🎯 当前目标: {status['current_target']}")
-        if status['waypoint_queue']:
-            print(f"  🛣️ 路径队列: {' → '.join(status['waypoint_queue'])}")
+        print(f"  🎯 任务状态: {'执行中' if scheduler_active else '空闲'}")
+        print(f"  📋 剩余段数: {scheduler_status.get('remaining_segments', 0)}")
+        if scheduler_status.get('current_segment'):
+            print(f"  🎯 当前目标: {scheduler_status.get('current_segment')}")
+        remaining_targets = scheduler_status.get('remaining_targets') or []
+        if remaining_targets:
+            print(f"  🛣️ 剩余目标: {' → '.join(remaining_targets)}")
         if hasattr(self, "agent_runtime"):
             agent_status = self.agent_runtime.status()
             print(f"  🧠 Agent Runtime: {'启用' if agent_status.get('enabled') else '关闭'}")
