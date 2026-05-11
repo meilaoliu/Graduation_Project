@@ -35,11 +35,18 @@ class WaypointManager:
         self.goal_pub = rospy.Publisher(goal_topic, PoseStamped, queue_size=10)
         self.odom_sub = rospy.Subscriber(odom_topic, Odometry, self.odom_callback, queue_size=1)
         
-        # 等待发布者建立连接
+        # 经典逐航点模式需要该订阅者；全局轨迹模式不应因启动顺序卡死。
+        goal_wait_timeout = float(rospy.get_param('~goal_connection_timeout', 3.0))
         rospy.loginfo("等待目标发布者建立连接...")
+        t0 = rospy.Time.now()
         while self.goal_pub.get_num_connections() == 0 and not rospy.is_shutdown():
+            if (rospy.Time.now() - t0).to_sec() >= goal_wait_timeout:
+                break
             rospy.sleep(0.1)
-        rospy.loginfo(f"目标发布者已连接，订阅者数量: {self.goal_pub.get_num_connections()}")
+        if self.goal_pub.get_num_connections() > 0:
+            rospy.loginfo(f"目标发布者已连接，订阅者数量: {self.goal_pub.get_num_connections()}")
+        else:
+            rospy.logwarn("目标发布者暂无订阅者，继续启动；全局轨迹模式可忽略此警告。")
         
         # 回调函数
         self.on_waypoint_reached: Optional[Callable[[str], None]] = None

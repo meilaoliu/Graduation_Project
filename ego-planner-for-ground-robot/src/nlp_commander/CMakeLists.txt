@@ -8,10 +8,13 @@ project(nlp_commander)
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  battery_simulator
   geometry_msgs
+  inspection_services
   nav_msgs
   rospy
   std_msgs
+  std_srvs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -106,7 +109,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES nlp_commander
-  CATKIN_DEPENDS geometry_msgs nav_msgs rospy std_msgs
+  CATKIN_DEPENDS battery_simulator geometry_msgs inspection_services nav_msgs rospy std_msgs std_srvs
 #  DEPENDS system_lib
 )
 

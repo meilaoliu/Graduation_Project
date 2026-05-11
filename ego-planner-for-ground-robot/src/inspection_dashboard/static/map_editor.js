@@ -169,18 +169,31 @@ function normalizeEdgeNames() {
   DATA.edges.forEach((e) => { e.name = edgeName(e); });
 }
 
+function defaultArchiveLabel() {
+  const d = new Date();
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  return `地图编辑_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_` +
+         `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
 function isInterpolationNode(n) {
   const tags = n && n.tags ? n.tags : {};
   return tags.device_type === 'waypoint' || tags.role === 'transit';
 }
 
 async function saveMap() {
+  const archiveLabel = prompt('保存前会自动备份当前 OSM，请输入本次存档名称：', defaultArchiveLabel());
+  if (archiveLabel === null) {
+    setStatus('已取消保存', '');
+    return;
+  }
   setStatus('保存中...', '');
   normalizeEdgeNames();
   const body = {
     osm_path: DATA.osm_path,
     nodes: DATA.nodes,
     edges: DATA.edges,
+    archive_label: archiveLabel.trim(),
   };
   const r = await fetch('/api/map', {
     method: 'POST',
@@ -1044,15 +1057,34 @@ async function refreshArchives() {
       const li = document.createElement('li');
       li.className = 'ar-item';
       const sizeKb = (it.size / 1024).toFixed(1);
+      const label = it.label || '未命名存档';
       li.innerHTML =
-        `<div class="ar-meta"><span class="ar-time"></span>` +
+        `<div class="ar-meta"><span class="ar-label"></span><span class="ar-time"></span>` +
         `<span class="ar-size">${sizeKb} KB</span></div>` +
         `<div class="ar-actions">` +
+        `<button type="button" class="ar-rename" title="重命名此存档">✎</button>` +
         `<button type="button" class="ar-restore" title="恢复到此版本">↶ 恢复</button>` +
         `<button type="button" class="ar-delete" title="删除此存档">🗑</button>` +
         `</div>`;
+      li.querySelector('.ar-label').textContent = label;
       li.querySelector('.ar-time').textContent = fmtArTime(it.mtime);
       li.title = it.name;
+      li.querySelector('.ar-rename').addEventListener('click', async () => {
+        const nextLabel = prompt('输入新的存档名称（留空则恢复为未命名）：', it.label || '');
+        if (nextLabel === null) return;
+        try {
+          const rr = await fetch('/api/map/archives/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: it.name, label: nextLabel }),
+          }).then((x) => x.json());
+          if (!rr.ok) throw new Error(rr.error || 'rename failed');
+          setStatus(`✎ 已重命名为 ${rr.label || '未命名存档'}`, 'ok');
+          await refreshArchives();
+        } catch (e) {
+          setStatus('重命名失败: ' + e.message, 'err');
+        }
+      });
       li.querySelector('.ar-restore').addEventListener('click', async () => {
         if (!confirm(`恢复到 ${fmtArTime(it.mtime)} 的版本？\n` +
                      `当前未保存的修改会丢失，但当前文件会先存档一次。`)) return;

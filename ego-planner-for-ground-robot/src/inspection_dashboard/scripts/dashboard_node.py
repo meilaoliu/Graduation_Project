@@ -119,6 +119,7 @@ from xml.dom import minidom
 from flask import request, jsonify, abort
 import shutil
 import datetime as _dt
+import re
 
 
 def _osm_path():
@@ -474,6 +475,15 @@ def _call_reload_map_service(timeout=2.0):
         return False, f'{e}'
 
 
+def _safe_archive_label(label):
+    label = str(label or '').strip()
+    if not label:
+        return ''
+    label = re.sub(r'[\\/:\*\?"<>\|\s]+', '_', label)
+    label = re.sub(r'_+', '_', label).strip('._-')
+    return label[:48]
+
+
 @app.route('/api/map', methods=['POST'])
 def api_map_post():
     payload = request.get_json(silent=True) or {}
@@ -487,7 +497,7 @@ def api_map_post():
         return jsonify({'error': 'osm_path not allowed'}), 403
     try:
         # 1. 自动存档（如果旧文件存在），保留误操作回滚能力
-        archive_msg = _archive_osm_if_exists(target)
+        archive_msg = _archive_osm_if_exists(target, payload.get('archive_label', ''))
 
         _write_osm_payload(target, payload)
         # 同步生成简化版 (供 LLM 使用)
@@ -526,7 +536,7 @@ def _archive_dir():
     return os.path.join(os.path.dirname(_osm_path()), '_archive')
 
 
-def _archive_osm_if_exists(target_path):
+def _archive_osm_if_exists(target_path, label=''):
     if not os.path.isfile(target_path):
         return 'no-prior'
     try:
@@ -534,7 +544,8 @@ def _archive_osm_if_exists(target_path):
         os.makedirs(d, exist_ok=True)
         ts = time.strftime('%Y%m%d_%H%M%S', time.localtime())
         base = os.path.basename(target_path)
-        archive_name = f'{base}.{ts}.osm'
+        safe_label = _safe_archive_label(label)
+        archive_name = f'{base}.{ts}.{safe_label}.osm' if safe_label else f'{base}.{ts}.osm'
         archive_path = os.path.join(d, archive_name)
         # 简单 copy
         with open(target_path, 'rb') as fin, open(archive_path, 'wb') as fout:
@@ -569,6 +580,7 @@ def api_map_archives():
                 st = os.stat(path)
                 items.append({
                     'name': name,
+                    'label': _archive_label_from_name(name),
                     'mtime': st.st_mtime,
                     'size': st.st_size,
                 })
@@ -578,6 +590,24 @@ def api_map_archives():
     return jsonify({'archives': items})
 
 
+def _archive_label_from_name(name):
+    base = os.path.basename(_osm_path())
+    prefix = base + '.'
+    suffix = '.osm'
+    if not (name.startswith(prefix) and name.endswith(suffix)):
+        return ''
+    stem = name[len(prefix):-len(suffix)]
+    parts = stem.split('.', 1)
+    return parts[1] if len(parts) == 2 else ''
+
+
+def _validate_archive_name(name):
+    if not name or '/' in name or '\\' in name or '..' in name:
+        return False
+    base = os.path.basename(_osm_path())
+    return name.startswith(base + '.') and name.endswith('.osm')
+
+
 @app.route('/api/map/archives/delete', methods=['POST'])
 def api_map_archives_delete():
     """删除指定的 osm 历史存档。
@@ -585,11 +615,8 @@ def api_map_archives_delete():
     """
     body = request.get_json(silent=True) or {}
     name = body.get('name', '')
-    if not name or '/' in name or '\\' in name or '..' in name:
+    if not _validate_archive_name(name):
         return jsonify({'ok': False, 'error': 'invalid name'}), 400
-    base = os.path.basename(_osm_path())
-    if not (name.startswith(base + '.') and name.endswith('.osm')):
-        return jsonify({'ok': False, 'error': 'name does not match archive pattern'}), 400
     target = os.path.join(_archive_dir(), name)
     if not os.path.isfile(target):
         return jsonify({'ok': False, 'error': 'archive not found'}), 404
@@ -602,12 +629,41 @@ def api_map_archives_delete():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/map/archives/rename', methods=['POST'])
+def api_map_archives_rename():
+    """重命名历史存档的自定义标签，保留原始时间戳。"""
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '')
+    label = body.get('label', '')
+    if not _validate_archive_name(name):
+        return jsonify({'ok': False, 'error': 'invalid name'}), 400
+    src = os.path.join(_archive_dir(), name)
+    if not os.path.isfile(src):
+        return jsonify({'ok': False, 'error': 'archive not found'}), 404
+
+    base = os.path.basename(_osm_path())
+    stem = name[len(base) + 1:-4]
+    ts = stem.split('.', 1)[0]
+    safe_label = _safe_archive_label(label)
+    new_name = f'{base}.{ts}.{safe_label}.osm' if safe_label else f'{base}.{ts}.osm'
+    dst = os.path.join(_archive_dir(), new_name)
+    if new_name != name and os.path.exists(dst):
+        return jsonify({'ok': False, 'error': 'archive name already exists'}), 409
+    try:
+        os.replace(src, dst)
+        rospy.loginfo(f"[dashboard] archive renamed: {name} -> {new_name}")
+        return jsonify({'ok': True, 'name': new_name, 'label': safe_label})
+    except Exception as e:
+        rospy.logerr(f"[dashboard] archive rename failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 
 @app.route('/api/map/restore', methods=['POST'])
 def api_map_restore():
     body = request.get_json(silent=True) or {}
     name = body.get('name', '')
-    if not name or '/' in name or '\\' in name or '..' in name:
+    if not _validate_archive_name(name):
         return jsonify({'ok': False, 'error': 'invalid name'}), 400
     src = os.path.join(_archive_dir(), name)
     if not os.path.isfile(src):
