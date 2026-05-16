@@ -487,4 +487,9 @@
     <nd ref="28"/>
     <tag k="name" v="充电口-插值点12"/>
   </way>
+  <way id="2017">
+    <nd ref="14"/>
+    <nd ref="12"/>
+    <tag k="name" v="2SVG无功补偿区-插值点2"/>
+  </way>
 </osm>
