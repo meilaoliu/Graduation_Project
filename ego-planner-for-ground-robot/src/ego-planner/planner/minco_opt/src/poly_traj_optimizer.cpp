@@ -10,6 +10,22 @@ using namespace std;
 
 namespace ego_planner
 {
+  namespace
+  {
+    constexpr int kMaxUnsafeRestarts = 6;
+
+    double restartPerturbationAmp(int restart_nums)
+    {
+      if (restart_nums <= 1)
+        return 0.005;
+      if (restart_nums == 2)
+        return 0.02;
+      if (restart_nums <= 4)
+        return 0.05;
+      return 0.10;
+    }
+  }
+
   /* main planning API */
   bool PolyTrajOptimizer::optimizeTrajectory(
       const Eigen::MatrixXd &iniState, const Eigen::MatrixXd &finState,
@@ -146,7 +162,7 @@ namespace ego_planner
             PRINTF_COND("\033[32miter=%d,time(ms)=%5.3f, fine check collided, keep optimizing\n\033[0m", iter_num_, time_ms);
             // [Fix J: 确定性 restart 扰动] 必须保留: amp=0 会让 3 次 restart 包同一盆地 → 毫无意义
             {
-              double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+              double amp = restartPerturbationAmp(restart_nums);
               for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
                 x_init[k] += ((k % 2 == 0) ? amp : -amp);
               for (int col = 0; col < initInnerPts2d.cols(); ++col)
@@ -165,11 +181,11 @@ namespace ego_planner
         PRINTF_COND("iter=%d, time(ms)=%f, error\n", iter_num_, time_ms);
         ROS_WARN_COND(VERBOSE_OUTPUT, "Solver error. Return = %d, %s. Skip this planning.", result, lbfgs::lbfgs_strerror(result));
         // [Fix J: ROUNDING_ERROR 同样确定性微扰动]
-        if (result == lbfgs::LBFGSERR_ROUNDING_ERROR && restart_nums < 3)
+        if (result == lbfgs::LBFGSERR_ROUNDING_ERROR && restart_nums < kMaxUnsafeRestarts)
         {
           flag_still_unsafe = true;
           restart_nums++;
-          double amp = (restart_nums == 1) ? 0.005 : (restart_nums == 2 ? 0.02 : 0.05);
+          double amp = restartPerturbationAmp(restart_nums);
           for (int k = 0; k < (int)initInnerPts2d.size(); ++k)
             x_init[k] += ((k % 2 == 0) ? amp : -amp);
           for (int col = 0; col < initInnerPts2d.cols(); ++col)
@@ -177,7 +193,7 @@ namespace ego_planner
         }
       }
 
-    } while ((flag_still_unsafe && restart_nums < 3) ||
+    } while ((flag_still_unsafe && restart_nums < kMaxUnsafeRestarts) ||
              (flag_force_return && force_stop_type_ == STOP_FOR_REBOUND && rebound_times <= 20));
 
     // Update diagnostic tracking variables
@@ -197,7 +213,7 @@ namespace ego_planner
           (last_failure_reason_ == "astar_input_diverged");
       if (!specific_already_set)
       {
-        if (restart_nums >= 3)
+        if (restart_nums >= kMaxUnsafeRestarts)
           last_failure_reason_ = "max_restarts";
         else if (rebound_times > 20)
           last_failure_reason_ = "max_rebounds";
@@ -317,17 +333,9 @@ namespace ego_planner
     int same_occ_state_times = ENOUGH_INTERVAL + 1;
     bool occ, last_occ = false;
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
-    int i_end = ConstraintPoints::two_thirds_id(init_points, touch_goal_); // only check closed 2/3 points.
-
-    // === 修复 A: 地面机器人 5s 轨迹的最后 1/3 (~2m) 不能省略校验,
-    // 否则 finelyCheck 直接漏过尾段的障碍 → FSM 当成 OBS_FREE 发布 →
-    // checkCollisionCallback 才在 t=2.x 处补救, 但车已开过去撞了。
-    // touch_goal 时 two_thirds_id 已 = cols-1; 这里只在非 touch_goal 路径下扩到 95%。
-    if (!touch_goal_)
-    {
-      int extended = init_points.cols() - 2; // 留 1 个尾点缓冲, 其余全检
-      if (extended > i_end) i_end = extended;
-    }
+    // Ground robots cannot skip the last third of a 5s local trajectory: the
+    // tail can cover meters of drivable space before the next replan tick.
+    int i_end = ConstraintPoints::ground_robot_safety_check_id(init_points, touch_goal_);
 
     PtsChk_t pts_check;
     if (!computePointsToCheck(traj, i_end, pts_check))

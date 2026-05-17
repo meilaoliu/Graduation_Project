@@ -9,7 +9,7 @@
   <arg name="pointcloud_topic" value="/registered_scan" />
   <arg name="use_patchworkpp" value="true" />
   
-  <arg name="use_rqt_robot_steering" value="true" />
+  <arg name="use_rqt_robot_steering" default="false" />
   
   <!-- main algorithm params -->
   <include file="$(find ego_planner)/launch/advanced_param.xml">

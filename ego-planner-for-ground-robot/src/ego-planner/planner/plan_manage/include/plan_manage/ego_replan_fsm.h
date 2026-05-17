@@ -99,6 +99,8 @@ namespace ego_planner
     int consecutive_gen_failure_count_{0};
     // 修复 B: GEN_NEW_TRAJ 失败后强制 100ms 冷却, 防 33ms 内同 start/target 堆 30 次 max_restarts
     ros::Time last_gen_failure_stamp_{ros::Time(0)};
+    ros::Time last_replan_failure_stamp_{ros::Time(0)};
+    ros::Time emergency_stop_start_stamp_{ros::Time(0)};
 
     bool flag_escape_emergency_;
 

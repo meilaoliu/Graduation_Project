@@ -34,6 +34,8 @@ include_directories(
     ${PCL_INCLUDE_DIRS}
 )
 
+link_directories(${PCL_LIBRARY_DIRS})
+
 add_library( bspline_opt 
     src/uniform_bspline.cpp 
     src/bspline_optimizer.cpp 
@@ -41,4 +43,5 @@ add_library( bspline_opt
     )
 target_link_libraries( bspline_opt
     ${catkin_LIBRARIES} 
+    ${PCL_LIBRARIES}
     )  

@@ -30,7 +30,7 @@ include_directories(
     ${catkin_INCLUDE_DIRS}
     ${Eigen3_INCLUDE_DIRS} 
     ${PCL_INCLUDE_DIRS}
-    ${CMAKE_SOURCE_DIR}/ego-planner/planner/minco_opt/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../minco_opt/include
 )
 
 link_directories(${PCL_LIBRARY_DIRS})
