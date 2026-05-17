@@ -56,6 +56,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
 )
 
+link_directories(${PCL_LIBRARY_DIRS})
 
 add_executable(ego_planner_node
   src/ego_planner_node.cpp 
@@ -64,11 +65,17 @@ add_executable(ego_planner_node
   )
 target_link_libraries(ego_planner_node 
   ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
   )
 add_dependencies(ego_planner_node ${${PROJECT_NAME}_EXPORTED_TARGETS})
 
 add_executable(traj_server src/traj_server.cpp)
-target_link_libraries(traj_server ${catkin_LIBRARIES} libqpOASES.so)
+target_link_libraries(traj_server ${catkin_LIBRARIES} ${PCL_LIBRARIES} libqpOASES.so)
 add_dependencies(traj_server ${${PROJECT_NAME}_EXPORTED_TARGETS})
 
-
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_ground_safety_utils test/test_ground_safety_utils.cpp)
+  if(TARGET test_ground_safety_utils)
+    target_link_libraries(test_ground_safety_utils ${catkin_LIBRARIES})
+  endif()
+endif()

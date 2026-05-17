@@ -431,6 +431,40 @@ namespace ego_planner
         return true;
     }
 
+    bool EGOPlannerManager::ControlledStop(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel,
+                                           const Eigen::Vector3d &start_acc, const Eigen::Vector3d &stop_pos,
+                                           double duration)
+    {
+        if (!use_minco_)
+            return false;
+
+        const double fixed_z = start_pos.z();
+        Eigen::Matrix3d headState, tailState;
+        Eigen::Vector3d start_pos_2d = start_pos;
+        Eigen::Vector3d start_vel_2d = start_vel;
+        Eigen::Vector3d start_acc_2d = start_acc;
+        Eigen::Vector3d stop_pos_2d = stop_pos;
+        start_pos_2d.z() = fixed_z;
+        start_vel_2d.z() = 0.0;
+        start_acc_2d.z() = 0.0;
+        stop_pos_2d.z() = fixed_z;
+        duration = std::max(0.5, duration);
+
+        headState << start_pos_2d, start_vel_2d, start_acc_2d;
+        tailState << stop_pos_2d, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero();
+
+        poly_traj::MinJerkOpt stopMJO;
+        stopMJO.reset(headState, tailState, 1);
+        Eigen::MatrixXd innerPs;
+        Eigen::VectorXd durations(1);
+        durations(0) = duration;
+        stopMJO.generate(innerPs, durations);
+
+        setLocalTrajFromOpt(stopMJO, true);
+        local_data_.start_time_ = ros::Time::now();
+        return true;
+    }
+
     bool EGOPlannerManager::planGlobalTrajWaypoints(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                                     const std::vector<Eigen::Vector3d> &waypoints, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)
     {
@@ -1071,7 +1105,7 @@ namespace ego_planner
         Eigen::MatrixXd cps = opt.getInitConstraintPoints(minco_optimizer_->get_cps_num_prePiece_());
         PtsChk_t pts_to_check;
         
-        int i_end = ConstraintPoints::two_thirds_id(cps, touch_goal);
+        int i_end = ConstraintPoints::ground_robot_safety_check_id(cps, touch_goal);
         bool ret = minco_optimizer_->computePointsToCheck(traj, i_end, pts_to_check);
         
         if (ret && pts_to_check.size() >= 1 && pts_to_check.back().size() >= 1)

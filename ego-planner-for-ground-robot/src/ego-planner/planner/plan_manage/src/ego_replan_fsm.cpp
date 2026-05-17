@@ -1,5 +1,6 @@
 
 #include <plan_manage/ego_replan_fsm.h>
+#include <plan_manage/ground_safety_utils.h>
 
 #define PI 3.1415926
 #define yaw_error_max 20.0/180*PI
@@ -309,36 +310,28 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     // 这里先做一次螺旋搜索, 把目标投射到最近的可达自由点; 若邻域内无自由点
     // (如终点深陷大型障碍中央), 则直接拒绝该目标。
     auto goal_map = planner_manager_->grid_map_;
-    if (goal_map && goal_map->getInflateOccupancy(req_end_pt) == 1)
+    if (goal_map)
     {
-        bool found_free = false;
-        Eigen::Vector3d free_pt = req_end_pt;
-        constexpr double max_search_radius = 2.0;
+        constexpr double max_search_radius = 3.0;
         constexpr double step = 0.15;
-        for (double r = step; r <= max_search_radius && !found_free; r += step)
+        constexpr double clearance_radius = 0.35;
+        Eigen::Vector3d free_pt = req_end_pt;
+        const auto occupancy2d = [goal_map](const Eigen::Vector2d &pt) {
+            return goal_map->getInflateOccupancy2d(pt);
+        };
+        if (!projectToNearestFree2d(req_end_pt, occupancy2d, &free_pt,
+                                    max_search_radius, step, clearance_radius, step))
         {
-            for (double a = 0; a < 2.0 * M_PI - 1e-3; a += M_PI / 8.0)
-            {
-                Eigen::Vector3d cand(req_end_pt(0) + r * std::cos(a),
-                                     req_end_pt(1) + r * std::sin(a),
-                                     req_end_pt(2));
-                if (goal_map->getInflateOccupancy(cand) == 0)
-                {
-                    free_pt = cand;
-                    found_free = true;
-                    break;
-                }
-            }
-        }
-        if (!found_free)
-        {
-            ROS_ERROR("[goal_callback] Goal (%.2f, %.2f) lies inside obstacle and no free point within %.1fm. Goal rejected.",
-                      req_end_pt(0), req_end_pt(1), max_search_radius);
+            ROS_ERROR("[goal_callback] Goal (%.2f, %.2f) is blocked in the 2D inflated map and no %.2fm-clearance free point within %.1fm. Goal rejected.",
+                      req_end_pt(0), req_end_pt(1), clearance_radius, max_search_radius);
             return;
         }
-        ROS_WARN("[goal_callback] Goal (%.2f, %.2f) inside obstacle, projected to nearest free (%.2f, %.2f).",
-                 req_end_pt(0), req_end_pt(1), free_pt(0), free_pt(1));
-        req_end_pt = free_pt;
+        if ((free_pt.head<2>() - req_end_pt.head<2>()).norm() > 1e-5)
+        {
+            ROS_WARN("[goal_callback] Goal (%.2f, %.2f) blocked in 2D inflated map, projected to %.2fm-clearance free point (%.2f, %.2f).",
+                     req_end_pt(0), req_end_pt(1), clearance_radius, free_pt(0), free_pt(1));
+            req_end_pt = free_pt;
+        }
     }
 
     end_pt_ = req_end_pt;
@@ -631,6 +624,22 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
 
       start_pt_ = odom_pos_;
+      if (planner_manager_->grid_map_)
+      {
+        Eigen::Vector2d start_pt_2d(start_pt_(0), start_pt_(1));
+        if (planner_manager_->grid_map_->getInflateOccupancy2d(start_pt_2d) != 0)
+        {
+          ROS_WARN("[FSM] Start point (%.2f, %.2f) is blocked in the 2D inflated map; hold emergency stop instead of feeding MINCO.",
+                   start_pt_(0), start_pt_(1));
+          last_gen_failure_stamp_ = ros::Time::now();
+          consecutive_gen_failure_count_++;
+          emergency_stop_start_stamp_ = ros::Time::now();
+          cout << "final_plan_success=0" << endl;
+          callEmergencyStop(odom_pos_);
+          changeFSMExecState(EMERGENCY_STOP, "FSM_START_BLOCKED_2D");
+          break;
+        }
+      }
       // P0-B: 不再硬清零 start_vel_。MINCO finelyCheck 在 |v|≈0 时
       // 会让承载点的曲率/碰撞段判断失真，进而把 NaN 端点喂给 A*，
       // 触发大量 reason=max_restarts 与 EMERGENCY_STOP。
@@ -676,9 +685,11 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
       if (success)
       {
+          cout << "final_plan_success=1" << endl;
           // Fix G: 成功一次 → 重置 stuck 计数
           consecutive_init_collision_count_ = 0;
           consecutive_gen_failure_count_ = 0;
+          last_replan_failure_stamp_ = ros::Time(0);
           // 根据轨迹类型获取速度
           Eigen::Vector3d vel_start;
           auto info = &planner_manager_->local_data_;
@@ -764,6 +775,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           callEmergencyStop(odom_pos_);
           have_target_ = false;
           consecutive_init_collision_count_ = 0;
+          cout << "final_plan_success=0" << endl;
           changeFSMExecState(WAIT_TARGET, "FSM_FixG");
         }
         else if (consecutive_init_collision_count_ >= 5)
@@ -798,6 +810,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
               have_new_target_ = false;
               trigger_ = false;
               consecutive_gen_failure_count_ = 0;
+              cout << "final_plan_success=0" << endl;
               changeFSMExecState(WAIT_TARGET, "FSM");
               break;
             }
@@ -817,10 +830,13 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     case REPLAN_TRAJ:
     {
 
-      if (planFromCurrentTraj())
+      bool replan_success = planFromCurrentTraj();
+      if (replan_success)
       {
+          cout << "final_plan_success=1" << endl;
           // Fix G: 成功一次 → 重置 stuck 计数
           consecutive_init_collision_count_ = 0;
+          last_replan_failure_stamp_ = ros::Time(0);
           // 根据轨迹类型获取速度
           Eigen::Vector3d vel_start;
           auto info = &planner_manager_->local_data_;
@@ -865,6 +881,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             callEmergencyStop(odom_pos_);
             have_target_ = false;
             consecutive_init_collision_count_ = 0;
+            cout << "final_plan_success=0" << endl;
             changeFSMExecState(WAIT_TARGET, "FSM_FixG");
           }
           else if (consecutive_init_collision_count_ >= 5)
@@ -875,21 +892,58 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             planner_manager_->planGlobalTraj(odom_pos_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
                                               end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
             consecutive_init_collision_count_ = 0;
+            cout << "final_plan_success=0" << endl;
             changeFSMExecState(GEN_NEW_TRAJ, "FSM_FixG");
           }
             else if (exec_state_ == REPLAN_TRAJ)
             {
               auto info = &planner_manager_->local_data_;
               const double t_cur = (ros::Time::now() - info->start_time_).toSec();
-              if (info->use_minco_traj_ && t_cur >= 0.0 && t_cur < info->duration_ - 0.3)
+              bool previous_traj_safe = true;
+              if (info->use_minco_traj_ && planner_manager_->grid_map_)
+              {
+                const auto occupancy2d = [this](const Eigen::Vector2d &pt) {
+                  return planner_manager_->grid_map_->getInflateOccupancy2d(pt);
+                };
+                std::vector<TimedPoint3d> timed_points;
+                for (const auto &piece_points : info->pts_chk_)
+                {
+                  timed_points.insert(timed_points.end(), piece_points.begin(), piece_points.end());
+                }
+                const Eigen::Vector3d cur_pos = info->minco_traj_.getPos(t_cur);
+                const Eigen::Vector3d cur_vel = info->minco_traj_.getVel(t_cur);
+                const double max_acc = std::max(0.2, planner_manager_->pp_.max_acc_);
+                const double braking_window =
+                    std::max(emergency_time_, cur_vel.head<2>().norm() / max_acc + 0.20);
+                previous_traj_safe =
+                    occupancy2d(cur_pos.head<2>()) == 0 &&
+                    isSafeToContinueDuringReplan2d(timed_points, occupancy2d, t_cur, braking_window);
+              }
+
+              if (info->use_minco_traj_ && t_cur >= 0.0 && t_cur < info->duration_ - 0.3 &&
+                  previous_traj_safe)
               {
                 ROS_WARN_THROTTLE(0.5, "[FSM] REPLAN failed, keep executing previous traj for %.2fs",
                         info->duration_ - t_cur);
+                last_replan_failure_stamp_ = ros::Time::now();
+                cout << "final_plan_success=1" << endl;
                 changeFSMExecState(EXEC_TRAJ, "FSM_REPLAN_FAIL_KEEP_EXEC");
               }
               else
               {
-                changeFSMExecState(GEN_NEW_TRAJ, "FSM_REPLAN_FAIL_EXPIRED");
+                cout << "final_plan_success=0" << endl;
+                if (info->use_minco_traj_ && t_cur >= 0.0 && t_cur < info->duration_ - 0.3 &&
+                    !previous_traj_safe)
+                {
+                  ROS_WARN("[FSM] REPLAN failed and previous MINCO traj is unsafe in the stop window; emergency stop");
+                  emergency_stop_start_stamp_ = ros::Time::now();
+                  callEmergencyStop(odom_pos_);
+                  changeFSMExecState(EMERGENCY_STOP, "FSM_REPLAN_FAIL_UNSAFE");
+                }
+                else
+                {
+                  changeFSMExecState(GEN_NEW_TRAJ, "FSM_REPLAN_FAIL_EXPIRED");
+                }
               }
             }
           // 否则保持planFromCurrentTraj()设置的状态（如ADJUST_POSE）
@@ -964,6 +1018,11 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
       else
       {
+        if (last_replan_failure_stamp_.toSec() > 1e-5 &&
+            (ros::Time::now() - last_replan_failure_stamp_).toSec() < 0.2)
+        {
+          return;
+        }
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
       break;
@@ -983,16 +1042,30 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
 
       if (flag_escape_emergency_) // Avoiding repeated calls
       {
+        emergency_stop_start_stamp_ = ros::Time::now();
         callEmergencyStop(odom_pos_);
       }
       else
       {
-        if (odom_vel_.norm() < 0.1)
+        Eigen::Vector2d odom_pos_2d;
+        odom_pos_2d << odom_pos_(0), odom_pos_(1);
+        const bool robot_in_obstacle =
+            planner_manager_->grid_map_ && planner_manager_->grid_map_->getInflateOccupancy2d(odom_pos_2d);
+        const bool stop_hold_done =
+            emergency_stop_start_stamp_.toSec() > 1e-5 &&
+            (ros::Time::now() - emergency_stop_start_stamp_).toSec() > 1.0;
+
+        if (odom_vel_.norm() < 0.1 && stop_hold_done && !robot_in_obstacle)
         {
           // 恢复正常状态前，清除停止命令
           stop_cmd.data = 0;
           stop_pub.publish(stop_cmd);
+          emergency_stop_start_stamp_ = ros::Time(0);
           changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+        }
+        else if (robot_in_obstacle)
+        {
+          ROS_WARN_THROTTLE(1.0, "[FSM] Stay in EMERGENCY_STOP: robot is still in inflated obstacle");
         }
       }
 
@@ -1125,13 +1198,14 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     // - INIT: 初始化
     // - traj_id_ <= 0: 轨迹未初始化
     // - start_time_ 未设置
-    if (exec_state_ == WAIT_TARGET || exec_state_ == ADJUST_POSE || 
+    if (exec_state_ == WAIT_TARGET || exec_state_ == ADJUST_POSE || exec_state_ == EMERGENCY_STOP ||
         exec_state_ == INIT || info->traj_id_ <= 0 || info->start_time_.toSec() < 1e-5)
       return;
 
     /* ---------- 使用预缓存点进行碰撞检测 ---------- */
     const double t_cur = (ros::Time::now() - info->start_time_).toSec();
     const PtsChk_t &pts_chk = info->pts_chk_;
+    static ros::Time c2_minco_defer_replan_until;
 
     // MINCO 模式：使用预缓存点进行高效检测
     if (info->use_minco_traj_ && pts_chk.size() > 0)
@@ -1155,9 +1229,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
     find_ij_start:;
       
-      // 确定检测范围：只检测前 2/3 或全部（如果接近目标）
-      const bool touch_the_end = ((local_target_pt_ - end_pt_).norm() < 1e-2);
-      size_t i_end = touch_the_end ? pts_chk.size() : pts_chk.size() * 3 / 4;
+      // pts_chk_ is already generated with the MINCO ground-robot safety
+      // horizon. Do not shrink it again here, or execution-time collision
+      // monitoring becomes less conservative than the optimizer fine check.
+      size_t i_end = pts_chk.size();
+      const double t_safety_end =
+          std::min(info->duration_, t_cur + std::max(emergency_time_, planning_horizen_time_));
       
       // 遍历预缓存的检测点
       for (size_t i = i_start; i < i_end; ++i)
@@ -1165,6 +1242,8 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
         for (size_t j = (i == (size_t)i_start ? j_start : 0); j < pts_chk[i].size(); ++j)
         {
           double t = pts_chk[i][j].first;
+          if (t > t_safety_end)
+            return;
           Eigen::Vector3d p = pts_chk[i][j].second;
           
           // 2D 碰撞检测（地面机器人）
@@ -1173,9 +1252,39 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           
           if (map->getInflateOccupancy2d(p2d))
           {
+            const auto occupancy2d = [map](const Eigen::Vector2d &pt) {
+              return map->getInflateOccupancy2d(pt);
+            };
+            std::vector<TimedPoint3d> timed_points;
+            for (const auto &piece_points : pts_chk)
+            {
+              timed_points.insert(timed_points.end(), piece_points.begin(), piece_points.end());
+            }
+
+            const Eigen::Vector3d cur_pos = info->minco_traj_.getPos(t_cur);
+            const Eigen::Vector3d cur_vel = info->minco_traj_.getVel(t_cur);
+            const Eigen::Vector3d cur_acc = info->minco_traj_.getAcc(t_cur);
+            const double max_acc = std::max(0.2, planner_manager_->pp_.max_acc_);
+            const double speed = cur_vel.head<2>().norm();
+            const double stop_time = speed / max_acc;
+            const double braking_window = std::max(emergency_time_, stop_time + 0.20);
+            const bool current_position_occupied = occupancy2d(cur_pos.head<2>()) != 0;
+            const bool safe_to_keep =
+                !current_position_occupied &&
+                isSafeToContinueDuringReplan2d(timed_points, occupancy2d, t_cur, braking_window);
+
+            if (safe_to_keep && ros::Time::now() < c2_minco_defer_replan_until)
+            {
+              ROS_WARN_THROTTLE(1.0,
+                                "[SAFETY_C2] Collision ahead, old MINCO traj safe for %.2fs; defer retry and keep executing",
+                                braking_window);
+              return;
+            }
+
             /* 检测到碰撞，尝试重规划 */
             if (planFromCurrentTraj())
             {
+              c2_minco_defer_replan_until = ros::Time(0);
               // 重规划成功：立即发布新轨迹，重置时间
               ROS_INFO("[SAFETY] Replan success when collision detected at t=%.2f/%.2f", t, info->duration_);
               info->start_time_ = ros::Time::now();
@@ -1192,16 +1301,41 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             }
             else
             {
-              // 重规划失败
-              if (t - t_cur < emergency_time_)
+              if (current_position_occupied)
               {
-                ROS_WARN("[SAFETY] Emergency stop! Collision in %.2fs", t - t_cur);
+                ROS_WARN("[SAFETY_C2] Emergency stop: robot already in inflated obstacle");
                 changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+              }
+              else if (safe_to_keep)
+              {
+                const double defer_sec = std::min(0.50, std::max(0.25, braking_window * 0.35));
+                c2_minco_defer_replan_until = ros::Time::now() + ros::Duration(defer_sec);
+                ROS_WARN("[SAFETY_C2] Replan failed, old MINCO traj safe for %.2fs; keep EXEC and retry in %.2fs",
+                         braking_window, defer_sec);
               }
               else
               {
-                ROS_WARN("[SAFETY] Collision at t=%.2f, replan later", t);
-                changeFSMExecState(REPLAN_TRAJ, "SAFETY");
+                Eigen::Vector3d stop_target;
+                const bool has_stop_target =
+                    computeControlledStopTarget2d(cur_pos, cur_vel, max_acc, &stop_target);
+                if (has_stop_target &&
+                    isControlledStopPathFree2d(cur_pos, cur_vel, max_acc, occupancy2d,
+                                               std::max(0.05, map->getResolution())) &&
+                    planner_manager_->ControlledStop(cur_pos, cur_vel, cur_acc, stop_target,
+                                                     std::max(0.5, stop_time)))
+                {
+                  ROS_WARN("[SAFETY_C2] Replan failed, publishing controlled stop at %.2f %.2f",
+                           stop_target.x(), stop_target.y());
+                  info->start_time_ = ros::Time::now();
+                  publishMincoTraj();
+                  changeFSMExecState(EXEC_TRAJ, "SAFETY_C2_STOP");
+                }
+                else
+                {
+                  ROS_WARN("[SAFETY_C2] Emergency stop! Collision in %.2fs and stop path is not verified",
+                           t - t_cur);
+                  changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+                }
               }
               return;
             }
@@ -1275,8 +1409,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
                                         (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj,
                                         touch_goal_); // P2-C: 显式传 touch_goal
     have_new_target_ = false;
-
-    cout << "final_plan_success=" << plan_success << endl;
 
     if (plan_success)
     {

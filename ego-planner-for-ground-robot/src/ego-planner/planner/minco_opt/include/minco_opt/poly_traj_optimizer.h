@@ -60,6 +60,18 @@ namespace ego_planner
       return touch_goal ? points.cols() - 1 : points.cols() - 1 - (points.cols() - 2) / 3;
     }
 
+    static inline int ground_robot_safety_check_id(Eigen::MatrixXd &points, const bool touch_goal)
+    {
+      int id = two_thirds_id(points, touch_goal);
+      if (!touch_goal)
+      {
+        const int extended = points.cols() - 2;
+        if (extended > id)
+          id = extended;
+      }
+      return id;
+    }
+
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
   };
 
