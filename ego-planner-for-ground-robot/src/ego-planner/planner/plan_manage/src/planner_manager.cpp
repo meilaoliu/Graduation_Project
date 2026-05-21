@@ -4,9 +4,24 @@
 #include <iomanip>
 #include <sys/stat.h>
 #include <ros/package.h>
+#include <cmath>
 
 namespace ego_planner
 {
+    namespace
+    {
+        Eigen::Vector3d projectToPlane(Eigen::Vector3d p, const double z)
+        {
+            p.z() = z;
+            return p;
+        }
+
+        Eigen::Vector3d planarDerivative(Eigen::Vector3d d)
+        {
+            d.z() = 0.0;
+            return d;
+        }
+    }
 
     // SECTION interfaces for setup and query
 
@@ -217,13 +232,16 @@ namespace ego_planner
                     Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
                                                          (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * horizen_dir * 0.8 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989) +
                                                          (((double)rand()) / RAND_MAX - 0.5) * (start_pt - local_target_pt).norm() * vertical_dir * 0.4 * (-0.978 / (continous_failures_count_ + 0.989) + 0.989);
+                    random_inserted_pt.z() = start_pt.z();
                     Eigen::MatrixXd pos(3, 3);
-                    pos.col(0) = start_pt;
+                    pos.col(0) = projectToPlane(start_pt, start_pt.z());
                     pos.col(1) = random_inserted_pt;
-                    pos.col(2) = local_target_pt;
+                    pos.col(2) = projectToPlane(local_target_pt, start_pt.z());
                     Eigen::VectorXd t(2);
                     t(0) = t(1) = time / 2;
-                    gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel, local_target_vel, start_acc, Eigen::Vector3d::Zero(), t);
+                    gl_traj = PolynomialTraj::minSnapTraj(
+                        pos, planarDerivative(start_vel), planarDerivative(local_target_vel),
+                        planarDerivative(start_acc), Eigen::Vector3d::Zero(), t);
                 }
 
                 double t;
@@ -470,20 +488,56 @@ namespace ego_planner
     {
 
         // generate global reference trajectory
+        if (waypoints.empty())
+        {
+            ROS_WARN("[global_traj] empty waypoint sequence.");
+            return false;
+        }
+
+        const double fixed_z = start_pos.z();
+        const Eigen::Vector3d start_pos_2d = projectToPlane(start_pos, fixed_z);
+        const Eigen::Vector3d start_vel_2d = planarDerivative(start_vel);
+        const Eigen::Vector3d start_acc_2d = planarDerivative(start_acc);
+        const Eigen::Vector3d end_vel_2d = planarDerivative(end_vel);
+        const Eigen::Vector3d end_acc_2d = planarDerivative(end_acc);
 
         vector<Eigen::Vector3d> points;
-        points.push_back(start_pos);
+        points.push_back(start_pos_2d);
 
+        // 去重阈值：避免上一段终点 == 下一段拓扑起节点造成 inner waypoint 与起点重合，
+        // 进而让 minSnapTraj 第一段 time=norm/v_max≈0、5阶多项式系数 1/T^5 爆炸。
+        const double dedup_dist = 0.3; // m
         for (size_t wp_i = 0; wp_i < waypoints.size(); wp_i++)
         {
-            points.push_back(waypoints[wp_i]);
+            if (std::fabs(waypoints[wp_i].z() - fixed_z) > 1e-3)
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[global_traj] project waypoint z %.3f to fixed plane z %.3f.",
+                                  waypoints[wp_i].z(), fixed_z);
+            }
+            Eigen::Vector3d wp_2d = projectToPlane(waypoints[wp_i], fixed_z);
+            const double gap = (wp_2d - points.back()).norm();
+            if (gap < dedup_dist)
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[global_traj] drop near-duplicate waypoint #%zu at (%.2f, %.2f), "
+                                  "gap to prev = %.3f m (< %.2f m).",
+                                  wp_i, wp_2d.x(), wp_2d.y(), gap, dedup_dist);
+                continue;
+            }
+            points.push_back(wp_2d);
+        }
+
+        if (points.size() < 2)
+        {
+            ROS_WARN("[global_traj] after dedup only %zu point(s) left; abort.", points.size());
+            return false;
         }
 
         double total_len = 0;
-        total_len += (start_pos - waypoints[0]).norm();
-        for (size_t i = 0; i < waypoints.size() - 1; i++)
+        for (size_t i = 0; i + 1 < points.size(); i++)
         {
-            total_len += (waypoints[i + 1] - waypoints[i]).norm();
+            total_len += (points[i + 1] - points[i]).norm();
         }
 
         // insert intermediate points if too far
@@ -523,9 +577,13 @@ namespace ego_planner
 
         Eigen::Vector3d zero(0, 0, 0);
         Eigen::VectorXd time(pt_num - 1);
+        // 段时长下限：兜底防御任意奇异短段（如 inter_points 后仍出现 < 0.6s 的段），
+        // 避免 5 阶多项式系数 1/T^5 让全局轨迹瞬时速度爆炸。
+        const double min_seg_time = 0.6; // s
         for (int i = 0; i < pt_num - 1; ++i)
         {
             time(i) = (pos.col(i + 1) - pos.col(i)).norm() / (pp_.max_vel_);
+            if (time(i) < min_seg_time) time(i) = min_seg_time;
         }
 
         time(0) *= 2.0;
@@ -533,9 +591,9 @@ namespace ego_planner
 
         PolynomialTraj gl_traj;
         if (pos.cols() >= 3)
-            gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel, end_vel, start_acc, end_acc, time);
+            gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel_2d, end_vel_2d, start_acc_2d, end_acc_2d, time);
         else if (pos.cols() == 2)
-            gl_traj = PolynomialTraj::one_segment_traj_gen(start_pos, start_vel, start_acc, pos.col(1), end_vel, end_acc, time(0));
+            gl_traj = PolynomialTraj::one_segment_traj_gen(start_pos_2d, start_vel_2d, start_acc_2d, pos.col(1), end_vel_2d, end_acc_2d, time(0));
         else
             return false;
 
@@ -550,10 +608,29 @@ namespace ego_planner
     {
 
         // generate global reference trajectory
+        const double fixed_z = start_pos.z();
+        const Eigen::Vector3d start_pos_2d = projectToPlane(start_pos, fixed_z);
+        const Eigen::Vector3d end_pos_2d = projectToPlane(end_pos, fixed_z);
+        const Eigen::Vector3d start_vel_2d = planarDerivative(start_vel);
+        const Eigen::Vector3d start_acc_2d = planarDerivative(start_acc);
+        const Eigen::Vector3d end_vel_2d = planarDerivative(end_vel);
+        const Eigen::Vector3d end_acc_2d = planarDerivative(end_acc);
+        if (std::fabs(end_pos.z() - fixed_z) > 1e-3)
+        {
+            ROS_WARN_THROTTLE(2.0,
+                              "[global_traj] project goal z %.3f to fixed plane z %.3f.",
+                              end_pos.z(), fixed_z);
+        }
 
         vector<Eigen::Vector3d> points;
-        points.push_back(start_pos);
-        points.push_back(end_pos);
+        points.push_back(start_pos_2d);
+        const double dedup_dist = 0.3; // m，与 planGlobalTrajWaypoints 同步
+        if ((end_pos_2d - start_pos_2d).norm() < dedup_dist)
+        {
+            ROS_WARN("[global_traj] goal is within %.2f m of current pos; skip global plan.", dedup_dist);
+            return false;
+        }
+        points.push_back(end_pos_2d);
 
         // insert intermediate points if too far
         vector<Eigen::Vector3d> inter_points;
@@ -588,9 +665,11 @@ namespace ego_planner
 
         Eigen::Vector3d zero(0, 0, 0);
         Eigen::VectorXd time(pt_num - 1);
+        const double min_seg_time = 0.6; // s
         for (int i = 0; i < pt_num - 1; ++i)
         {
             time(i) = (pos.col(i + 1) - pos.col(i)).norm() / (pp_.max_vel_);
+            if (time(i) < min_seg_time) time(i) = min_seg_time;
         }
 
         time(0) *= 2.0;
@@ -598,9 +677,9 @@ namespace ego_planner
 
         PolynomialTraj gl_traj;
         if (pos.cols() >= 3)
-            gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel, end_vel, start_acc, end_acc, time);
+            gl_traj = PolynomialTraj::minSnapTraj(pos, start_vel_2d, end_vel_2d, start_acc_2d, end_acc_2d, time);
         else if (pos.cols() == 2)
-            gl_traj = PolynomialTraj::one_segment_traj_gen(start_pos, start_vel, start_acc, end_pos, end_vel, end_acc, time(0));
+            gl_traj = PolynomialTraj::one_segment_traj_gen(start_pos_2d, start_vel_2d, start_acc_2d, end_pos_2d, end_vel_2d, end_acc_2d, time(0));
         else
             return false;
 

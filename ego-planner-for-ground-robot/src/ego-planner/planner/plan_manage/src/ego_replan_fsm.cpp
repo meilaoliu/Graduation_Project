@@ -1,6 +1,7 @@
 
 #include <plan_manage/ego_replan_fsm.h>
 #include <plan_manage/ground_safety_utils.h>
+#include <cmath>
 
 #define PI 3.1415926
 #define yaw_error_max 20.0/180*PI
@@ -150,7 +151,7 @@ namespace ego_planner
 
 
     bool success = false;
-    end_pt_ << msg->poses[0].pose.position.x, msg->poses[0].pose.position.y, 1.0;
+    end_pt_ << msg->poses[0].pose.position.x, msg->poses[0].pose.position.y, odom_pos_(2);
     success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), end_pt_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
     visualization_->displayGoalPoint(end_pt_, Eigen::Vector4d(0, 0.5, 0.5, 1), 0.3, 0);
@@ -228,7 +229,14 @@ namespace ego_planner
     wps.reserve(msg->poses.size());
     for (const auto &p : msg->poses)
     {
-      wps.emplace_back(p.pose.position.x, p.pose.position.y, p.pose.position.z);
+      Eigen::Vector3d wp(p.pose.position.x, p.pose.position.y, odom_pos_(2));
+      if (std::fabs(p.pose.position.z - odom_pos_(2)) > 1e-3)
+      {
+        ROS_WARN_THROTTLE(2.0,
+                          "[FSM][segment] project incoming waypoint z %.3f to odom plane z %.3f.",
+                          p.pose.position.z, odom_pos_(2));
+      }
+      wps.emplace_back(wp);
     }
 
     // 起点位姿用当前 odom，符合"机器人就停在上段终点"的物理事实
