@@ -5,9 +5,20 @@
 
 #define PI 3.1415926
 #define yaw_error_max 20.0/180*PI
+// forward_only 退出 ADJUST_POSE 用更严阈值 + 滞回，避免 20° 边界来回抖
+#define yaw_error_exit_max 10.0/180*PI
+#define adjust_settle_ticks 10
 
 namespace ego_planner
 {
+
+  static double shortestYawError(double target_yaw, double current_yaw)
+  {
+    double err = target_yaw - current_yaw;
+    while (err > PI) err -= 2.0 * PI;
+    while (err < -PI) err += 2.0 * PI;
+    return err;
+  }
 
   void EGOReplanFSM::init(ros::NodeHandle &nh)
   {
@@ -567,7 +578,12 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             cmd_vel.linear.x = 0;
             cmd_vel.angular.z = 0;
             cmd_pub_.publish(cmd_vel);
-            
+            if (forward_only_)
+            {
+                is_adjust_pose.data = 1;
+                adjust_cmd_pub_.publish(is_adjust_pose);
+            }
+
             static int wait_count = 0;
             if (wait_count++ % 50 == 0)  // 每0.5秒打印一次
             {
@@ -575,42 +591,98 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             }
             break;  // 不执行后续的转向逻辑，等待下次回调
         }
-        
-        yaw_error = yaw_start-yaw;
-        //first step : calculate the yaw error
-        if(abs(yaw_error)>PI)
+
+        // forward_only: 进入时锁定目标航向；用退出滞回 + 连续稳定拍数，避免 ±π 跳变误判已对准
+        if (forward_only_ && !adjust_pose_latched_)
         {
-            yaw_error = yaw_error - yaw_error/abs(yaw_error)*2*PI;
+            adjust_target_yaw_ = yaw_start;
+            adjust_prev_yaw_ = yaw;
+            adjust_settle_count_ = 0;
+            adjust_pose_latched_ = true;
+            is_adjust_pose.data = 1;
+            adjust_cmd_pub_.publish(is_adjust_pose);
+            ROS_INFO("[ADJUST_POSE forward_only] latch target yaw=%.1f deg",
+                     adjust_target_yaw_ * 180.0 / PI);
         }
-        static int count=0;
-        if(count%100==0)
+
+        const double err_ref_yaw = (forward_only_ && adjust_pose_latched_) ? adjust_target_yaw_ : yaw_start;
+        yaw_error = shortestYawError(err_ref_yaw, yaw);
+
+        static int count = 0;
+        if (count % 100 == 0)
         {
-            string directions[2] = {"POSITIVE","NAGETIVE"};
-            cout << "direction : "<<directions[int(dir)]<<endl;
-            cout<<"current yaw: "<<yaw<<endl;
-            cout<<"yaw error : "<<yaw_error<<endl;
-            count=0;
+            string directions[2] = {"POSITIVE", "NAGETIVE"};
+            cout << "direction : " << directions[int(dir)] << endl;
+            cout << "current yaw: " << yaw << endl;
+            cout << "yaw error : " << yaw_error << endl;
+            count = 0;
         }
-        count+=1;
-        if(abs(yaw_error)>yaw_error_max)
+        count += 1;
+
+        const double turn_done_thresh =
+            forward_only_ ? yaw_error_exit_max : yaw_error_max;
+
+        // odom 在 ±π 附近单 tick 跳变 >90° 时，不累计“已对准”计数
+        bool odom_yaw_glitch = false;
+        if (forward_only_ && adjust_pose_latched_)
         {
+            const double step = std::fabs(shortestYawError(yaw, adjust_prev_yaw_));
+            if (step > PI / 2.0)
+            {
+                odom_yaw_glitch = true;
+                adjust_settle_count_ = 0;
+                ROS_WARN("[ADJUST_POSE forward_only] odom yaw step %.1f deg, ignore settle",
+                         step * 180.0 / PI);
+            }
+            adjust_prev_yaw_ = yaw;
+        }
+
+        if (std::fabs(yaw_error) > turn_done_thresh)
+        {
+            if (forward_only_)
+                adjust_settle_count_ = 0;
             is_adjust_pose.data = 1;
             cmd_vel.linear.x = 0;
-            cmd_vel.angular.z = yaw_error/abs(yaw_error)*w_adjust;
+            cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
             cmd_pub_.publish(cmd_vel);
             adjust_cmd_pub_.publish(is_adjust_pose);
-        }else
+        }
+        else
         {
-            is_adjust_pose.data = 0;
-            cmd_vel.linear.x = 0;
-            cmd_vel.angular.z =0;
-            cmd_pub_.publish(cmd_vel);
-            adjust_cmd_pub_.publish(is_adjust_pose);
-            
-            // 原地转向完成后，必须重新规划轨迹
-            // 因为之前的轨迹是基于旧的状态规划的，直接恢复会导致状态不匹配
-            // GEN_NEW_TRAJ 会调用 callReboundReplan(true) 从当前静止状态重新规划
-            changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+            bool finish_adjust = true;
+            if (forward_only_)
+            {
+                if (!odom_yaw_glitch)
+                    adjust_settle_count_++;
+                finish_adjust = (adjust_settle_count_ >= adjust_settle_ticks);
+            }
+
+            if (finish_adjust)
+            {
+                if (forward_only_)
+                {
+                    adjust_pose_latched_ = false;
+                    adjust_settle_count_ = 0;
+                    ROS_INFO("[ADJUST_POSE forward_only] aligned: yaw=%.1f, target=%.1f, err=%.1f deg",
+                             yaw * 180.0 / PI, err_ref_yaw * 180.0 / PI,
+                             yaw_error * 180.0 / PI);
+                }
+                is_adjust_pose.data = 0;
+                cmd_vel.linear.x = 0;
+                cmd_vel.angular.z = 0;
+                cmd_pub_.publish(cmd_vel);
+                adjust_cmd_pub_.publish(is_adjust_pose);
+
+                changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+            }
+            else
+            {
+                is_adjust_pose.data = 1;
+                cmd_vel.linear.x = 0;
+                cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
+                cmd_pub_.publish(cmd_vel);
+                adjust_cmd_pub_.publish(is_adjust_pose);
+            }
         }
         break;
     }
@@ -728,8 +800,13 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
               {
                   ROS_WARN("[FSM forward_only] Need to turn: yaw=%.1f, traj=%.1f, error=%.1f deg",
                            yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_error * 180.0 / PI);
+                  adjust_pose_latched_ = false;
+                  adjust_settle_count_ = 0;
                   cmd_vel.linear.x = 0;
                   cmd_vel.angular.z = yaw_error/abs(yaw_error)*w_adjust;
+                  is_adjust_pose.data = 1;
+                  adjust_cmd_pub_.publish(is_adjust_pose);
+                  cmd_pub_.publish(cmd_vel);
                   changeFSMExecState(ADJUST_POSE, "TRIG");
                   last_state_ = GEN_NEW_TRAJ;
                   is_target_receive=false;
@@ -858,19 +935,23 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           }
           yaw_start = atan2(vel_start(1),vel_start(0));
           yaw_error = yaw_start-yaw;
-          
+          if (abs(yaw_error) > PI)
+          {
+              yaw_error = yaw_error - yaw_error/abs(yaw_error)*2*PI;
+          }
+
           info->start_time_ = ros::Time::now();
           std_msgs::UInt8 stop_cmd;
           stop_cmd.data = 0;
           stop_pub.publish(stop_cmd);
           publishBspline();
-          
+
           // 可视化重规划的轨迹
           if (planner_manager_->pp_.use_minco_ && info->use_minco_traj_)
           {
             visualization_->displayMincoTraj(info->minco_traj_, 0.05, 0);
           }
-          
+
           changeFSMExecState(EXEC_TRAJ, "FSM");
       }
       else
@@ -1125,10 +1206,15 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             // 如果航向误差过大，需要原地掉头
             if (abs(yaw_error) > yaw_error_max)
             {
-                ROS_WARN("[FSM forward_only] Need to turn: yaw=%.1f, traj=%.1f, error=%.1f deg", 
+                ROS_WARN("[FSM forward_only] Need to turn: yaw=%.1f, traj=%.1f, error=%.1f deg",
                          yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_error * 180.0 / PI);
+                adjust_pose_latched_ = false;
+                adjust_settle_count_ = 0;
                 cmd_vel.linear.x = 0;
                 cmd_vel.angular.z = yaw_error / abs(yaw_error) * w_adjust;
+                is_adjust_pose.data = 1;
+                adjust_cmd_pub_.publish(is_adjust_pose);
+                cmd_pub_.publish(cmd_vel);
                 changeFSMExecState(ADJUST_POSE, "TRIG");
                 is_target_receive = false;
                 return false;

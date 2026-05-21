@@ -83,6 +83,11 @@ namespace ego_planner
     DIRECTION dir;
 
     double roll,pitch,yaw,yaw_start,yaw_error_threshold,yaw_error;
+    // forward_only 原地转向：进入 ADJUST_POSE 时锁定的目标航向 + 防抖
+    double adjust_target_yaw_{0.0};
+    double adjust_prev_yaw_{0.0};
+    int adjust_settle_count_{0};
+    bool adjust_pose_latched_{false};
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
     Eigen::Quaterniond odom_orient_;
 
