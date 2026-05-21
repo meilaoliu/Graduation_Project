@@ -101,7 +101,7 @@
     <!-- w_adjust :掉头速度 -->
     <param name="fsm/w_adjust_" value="1.0" type="double"/>
     <!-- forward_only: true=只允许前进(需要原地掉头), false=允许倒车 -->
-    <param name="fsm/forward_only" value="false" type="bool"/>
+    <param name="fsm/forward_only" value="true" type="bool"/>
 
     <param name="fsm/waypoint_num" value="$(arg point_num)" type="int"/>
     <param name="fsm/waypoint0_x" value="$(arg point0_x)" type="double"/>

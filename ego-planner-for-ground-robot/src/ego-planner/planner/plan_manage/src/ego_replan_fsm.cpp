@@ -570,11 +570,9 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     case ADJUST_POSE:
     {
         // Fix I: 不论 forward_only 与否, 进入 ADJUST_POSE 必须先等线速度趋零再开始转向
-        // 否则倒车模式下会边滑边转, 表现为"画圈"
-        double linear_speed = odom_vel_.head<2>().norm();  // 计算2D平面线速度
-        if (linear_speed > 0.05)  // 阈值 0.05 m/s, 比 0.1 严
+        double linear_speed = odom_vel_.head<2>().norm();
+        if (linear_speed > 0.05)
         {
-            // 发送停止命令
             cmd_vel.linear.x = 0;
             cmd_vel.angular.z = 0;
             cmd_pub_.publish(cmd_vel);
@@ -585,47 +583,39 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
             }
 
             static int wait_count = 0;
-            if (wait_count++ % 50 == 0)  // 每0.5秒打印一次
+            if (wait_count++ % 50 == 0)
             {
                 ROS_INFO("[ADJUST_POSE] Waiting for vehicle to stop: speed=%.3f m/s", linear_speed);
             }
-            break;  // 不执行后续的转向逻辑，等待下次回调
+            break;
         }
 
-        // forward_only: 进入时锁定目标航向；用退出滞回 + 连续稳定拍数，避免 ±π 跳变误判已对准
-        if (forward_only_ && !adjust_pose_latched_)
+        if (forward_only_)
         {
-            adjust_target_yaw_ = yaw_start;
-            adjust_prev_yaw_ = yaw;
-            adjust_settle_count_ = 0;
-            adjust_pose_latched_ = true;
-            is_adjust_pose.data = 1;
-            adjust_cmd_pub_.publish(is_adjust_pose);
-            ROS_INFO("[ADJUST_POSE forward_only] latch target yaw=%.1f deg",
-                     adjust_target_yaw_ * 180.0 / PI);
-        }
+            if (!adjust_pose_latched_)
+            {
+                adjust_target_yaw_ = yaw_start;
+                adjust_prev_yaw_ = yaw;
+                adjust_settle_count_ = 0;
+                adjust_pose_latched_ = true;
+                is_adjust_pose.data = 1;
+                adjust_cmd_pub_.publish(is_adjust_pose);
+                ROS_INFO("[ADJUST_POSE forward_only] latch target yaw=%.1f deg",
+                         adjust_target_yaw_ * 180.0 / PI);
+            }
 
-        const double err_ref_yaw = (forward_only_ && adjust_pose_latched_) ? adjust_target_yaw_ : yaw_start;
-        yaw_error = shortestYawError(err_ref_yaw, yaw);
+            yaw_error = shortestYawError(adjust_target_yaw_, yaw);
 
-        static int count = 0;
-        if (count % 100 == 0)
-        {
-            string directions[2] = {"POSITIVE", "NAGETIVE"};
-            cout << "direction : " << directions[int(dir)] << endl;
-            cout << "current yaw: " << yaw << endl;
-            cout << "yaw error : " << yaw_error << endl;
-            count = 0;
-        }
-        count += 1;
+            static int count = 0;
+            if (count % 100 == 0)
+            {
+                cout << "current yaw: " << yaw << endl;
+                cout << "yaw error : " << yaw_error << endl;
+                count = 0;
+            }
+            count += 1;
 
-        const double turn_done_thresh =
-            forward_only_ ? yaw_error_exit_max : yaw_error_max;
-
-        // odom 在 ±π 附近单 tick 跳变 >90° 时，不累计“已对准”计数
-        bool odom_yaw_glitch = false;
-        if (forward_only_ && adjust_pose_latched_)
-        {
+            bool odom_yaw_glitch = false;
             const double step = std::fabs(shortestYawError(yaw, adjust_prev_yaw_));
             if (step > PI / 2.0)
             {
@@ -635,53 +625,78 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
                          step * 180.0 / PI);
             }
             adjust_prev_yaw_ = yaw;
-        }
 
-        if (std::fabs(yaw_error) > turn_done_thresh)
-        {
-            if (forward_only_)
+            if (std::fabs(yaw_error) > yaw_error_exit_max)
+            {
                 adjust_settle_count_ = 0;
-            is_adjust_pose.data = 1;
-            cmd_vel.linear.x = 0;
-            cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
-            cmd_pub_.publish(cmd_vel);
-            adjust_cmd_pub_.publish(is_adjust_pose);
-        }
-        else
-        {
-            bool finish_adjust = true;
-            if (forward_only_)
-            {
-                if (!odom_yaw_glitch)
-                    adjust_settle_count_++;
-                finish_adjust = (adjust_settle_count_ >= adjust_settle_ticks);
-            }
-
-            if (finish_adjust)
-            {
-                if (forward_only_)
-                {
-                    adjust_pose_latched_ = false;
-                    adjust_settle_count_ = 0;
-                    ROS_INFO("[ADJUST_POSE forward_only] aligned: yaw=%.1f, target=%.1f, err=%.1f deg",
-                             yaw * 180.0 / PI, err_ref_yaw * 180.0 / PI,
-                             yaw_error * 180.0 / PI);
-                }
-                is_adjust_pose.data = 0;
-                cmd_vel.linear.x = 0;
-                cmd_vel.angular.z = 0;
-                cmd_pub_.publish(cmd_vel);
-                adjust_cmd_pub_.publish(is_adjust_pose);
-
-                changeFSMExecState(GEN_NEW_TRAJ, "FSM");
-            }
-            else
-            {
                 is_adjust_pose.data = 1;
                 cmd_vel.linear.x = 0;
                 cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
                 cmd_pub_.publish(cmd_vel);
                 adjust_cmd_pub_.publish(is_adjust_pose);
+            }
+            else
+            {
+                if (!odom_yaw_glitch)
+                    adjust_settle_count_++;
+                if (adjust_settle_count_ >= adjust_settle_ticks)
+                {
+                    adjust_pose_latched_ = false;
+                    adjust_settle_count_ = 0;
+                    ROS_INFO("[ADJUST_POSE forward_only] aligned: yaw=%.1f, target=%.1f, err=%.1f deg",
+                             yaw * 180.0 / PI, adjust_target_yaw_ * 180.0 / PI,
+                             yaw_error * 180.0 / PI);
+                    is_adjust_pose.data = 0;
+                    cmd_vel.linear.x = 0;
+                    cmd_vel.angular.z = 0;
+                    cmd_pub_.publish(cmd_vel);
+                    adjust_cmd_pub_.publish(is_adjust_pose);
+                    changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+                }
+                else
+                {
+                    is_adjust_pose.data = 1;
+                    cmd_vel.linear.x = 0;
+                    cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
+                    cmd_pub_.publish(cmd_vel);
+                    adjust_cmd_pub_.publish(is_adjust_pose);
+                }
+            }
+        }
+        else
+        {
+            // forward_only=false: 保持原倒车虚拟转向逻辑, 不受 forward_only 专用改动影响
+            yaw_error = yaw_start - yaw;
+            if (abs(yaw_error) > PI)
+            {
+                yaw_error = yaw_error - yaw_error / abs(yaw_error) * 2 * PI;
+            }
+            static int count = 0;
+            if (count % 100 == 0)
+            {
+                string directions[2] = {"POSITIVE", "NAGETIVE"};
+                cout << "direction : " << directions[int(dir)] << endl;
+                cout << "current yaw: " << yaw << endl;
+                cout << "yaw error : " << yaw_error << endl;
+                count = 0;
+            }
+            count += 1;
+            if (abs(yaw_error) > yaw_error_max)
+            {
+                is_adjust_pose.data = 1;
+                cmd_vel.linear.x = 0;
+                cmd_vel.angular.z = yaw_error / abs(yaw_error) * w_adjust;
+                cmd_pub_.publish(cmd_vel);
+                adjust_cmd_pub_.publish(is_adjust_pose);
+            }
+            else
+            {
+                is_adjust_pose.data = 0;
+                cmd_vel.linear.x = 0;
+                cmd_vel.angular.z = 0;
+                cmd_pub_.publish(cmd_vel);
+                adjust_cmd_pub_.publish(is_adjust_pose);
+                changeFSMExecState(GEN_NEW_TRAJ, "FSM");
             }
         }
         break;
@@ -946,7 +961,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           stop_pub.publish(stop_cmd);
           publishBspline();
 
-          // 可视化重规划的轨迹
           if (planner_manager_->pp_.use_minco_ && info->use_minco_traj_)
           {
             visualization_->displayMincoTraj(info->minco_traj_, 0.05, 0);
