@@ -288,6 +288,7 @@ namespace ego_planner
     have_new_target_ = true;
     trigger_ = true;
     has_active_segment_ = true;
+    segment_forward_local_target_ = true;
 
     ROS_INFO("[FSM][segment %u] accepted, %zu waypoints, duration=%.2fs.",
              current_segment_id_, wps.size(), planner_manager_->global_data_.global_duration_);
@@ -856,6 +857,7 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           cout<<"yaw error : "<<yaw_error<<endl;
         info->start_time_ = ros::Time::now();
         publishBspline();
+        segment_forward_local_target_ = false;
         changeFSMExecState(EXEC_TRAJ, "FSM");
         flag_escape_emergency_ = true;
       }
@@ -1648,6 +1650,59 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     {
       local_target_vel_ = planner_manager_->global_data_.getVelocity(t);
       // cout << "AA" << endl;
+    }
+
+    local_target_pt_(2) = odom_pos_(2);
+
+    // 段初局部目标若落在车头后方，沿全局轨迹向前搜索第一个前方 horizon 点
+    if (segment_forward_local_target_ && forward_only_)
+    {
+      Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block<3, 1>(0, 0);
+      const double odom_yaw = atan2(rot_x(1), rot_x(0));
+      const Eigen::Vector2d fwd(std::cos(odom_yaw), std::sin(odom_yaw));
+      const Eigen::Vector2d to_lc = (local_target_pt_ - start_pt_).head<2>();
+      const double old_lc_yaw =
+          to_lc.norm() > 0.05 ? atan2(to_lc(1), to_lc(0)) : odom_yaw;
+
+      if (to_lc.norm() > 0.05 && to_lc.normalized().dot(fwd) < 0.0)
+      {
+        const double min_dist = planning_horizen_ * 0.5;
+        bool found = false;
+        for (double t2 = planner_manager_->global_data_.last_progress_time_;
+             t2 < planner_manager_->global_data_.global_duration_; t2 += t_step)
+        {
+          Eigen::Vector3d pos_t2 = planner_manager_->global_data_.getPosition(t2);
+          const Eigen::Vector2d delta = (pos_t2 - start_pt_).head<2>();
+          if (delta.norm() < 0.05)
+            continue;
+          if (delta.normalized().dot(fwd) > 0.0 && delta.norm() >= min_dist)
+          {
+            local_target_pt_ = pos_t2;
+            local_target_pt_(2) = odom_pos_(2);
+            planner_manager_->global_data_.glb_t_of_lc_tgt_ = t2;
+            const double new_lc_yaw = atan2(delta(1), delta(0));
+            ROS_INFO(
+                "[getLocalTarget] seg#%u forward pick: odom=%.1f old_lc=%.1f new_lc=%.1f t=%.2f dist=%.2fm",
+                current_segment_id_, odom_yaw * 180.0 / PI, old_lc_yaw * 180.0 / PI,
+                new_lc_yaw * 180.0 / PI, t2, delta.norm());
+            found = true;
+            break;
+          }
+        }
+        if (!found)
+        {
+          ROS_WARN("[getLocalTarget] seg#%u no forward local target on global (old_lc=%.1f deg)",
+                   current_segment_id_, old_lc_yaw * 180.0 / PI);
+        }
+      }
+      else
+      {
+        ROS_INFO_THROTTLE(
+            1.0,
+            "[getLocalTarget] seg#%u lc_yaw=%.1f odom_yaw=%.1f err=%.1f deg (no behind fix)",
+            current_segment_id_, old_lc_yaw * 180.0 / PI, odom_yaw * 180.0 / PI,
+            shortestYawError(old_lc_yaw, odom_yaw) * 180.0 / PI);
+      }
     }
 
     // (Fix A 已回退: 经验证沿全局轨迹回溯/侧向扫描在 substation 高密度场景中
