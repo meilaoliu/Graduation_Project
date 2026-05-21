@@ -150,7 +150,7 @@
     <param name="manager/feasibility_tolerance" value="0.05" type="double"/>
     <param name="manager/planning_horizon" value="$(arg planning_horizon)" type="double"/>
     <!--是否开启拓扑同伦轨迹（会增加计算量）-->
-    <param name="manager/use_multitopology_trajs" value="true" type="bool"/>
+    <param name="manager/use_multitopology_trajs" value="false" type="bool"/>
 
   <!-- Bspline trajectory optimization -->
     <param name="optimization/lambda_smooth" value="1.0" type="double"/>

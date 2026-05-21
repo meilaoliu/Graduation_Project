@@ -1,0 +1,155 @@
+# 第六章端到端巡检实验任务集（14 条，5 大类）
+# 全站巡检归入「多目标巡检」
+
+tasks:
+  - id: T01
+    type: 单目标巡检
+    command: "去检查 35kV 配电箱 2"
+    expected_targets: ["35kv配电箱2"]
+    order_required: false
+    require_photo: true
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 240
+
+  - id: T02
+    type: 单目标巡检
+    command: "前往变压器区 1 拍照"
+    expected_targets: ["变压器区1"]
+    order_required: false
+    require_photo: true
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 240
+
+  - id: T03
+    type: 单目标巡检
+    command: "帮我看一下 svg2 那个点"
+    expected_targets: ["2SVG无功补偿区"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 240
+
+  - id: T04
+    type: 多目标巡检
+    command: "依次检查低压配电室 1、变压器区 2 和 1SVG 无功补偿区"
+    expected_targets: ["低压配电室1", "变压器区2", "1SVG无功补偿区"]
+    order_required: true
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 420
+
+  - id: T05
+    type: 多目标巡检
+    command: "按顺序巡检 35kv 配电箱 1、2、3，每个点都拍照"
+    expected_targets: ["35kv配电箱1", "35kv配电箱2", "35kv配电箱3"]
+    order_required: true
+    require_photo: true
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 480
+
+  - id: T06
+    type: 多目标巡检
+    command: "从入口点开始把主要设备巡检一遍"
+    expected_targets: []
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 900
+    notes: "全站任务，期望目标集合由人工核对地图主要巡检点；解析正确性按是否覆盖主要区域判断"
+
+  - id: T07
+    type: 区域模糊巡检
+    command: "巡检所有变压器"
+    expected_targets: ["变压器区1", "变压器区2", "变压器区3"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 480
+
+  - id: T08
+    type: 区域模糊巡检
+    command: "检查 SVG 区域"
+    expected_targets: ["1SVG无功补偿区", "2SVG无功补偿区", "3SVG无功补偿区"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 480
+
+  - id: T09
+    type: 区域模糊巡检
+    command: "去高压配电区看一下"
+    expected_targets: ["高压配电区巡检点1", "高压配电区巡检点2", "高压配电区巡检点3"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 480
+
+  - id: T10
+    type: 上下文相关指令
+    command: "返回入口点"
+    expected_targets: ["入口点"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 300
+    prerequisite_task: T07
+    prerequisite_command: "巡检所有变压器"
+
+  - id: T11
+    type: 上下文相关指令
+    command: "再去检查低压配电室 1"
+    expected_targets: ["低压配电室1"]
+    order_required: false
+    require_photo: false
+    require_charge: false
+    init_battery: 100
+    timeout_sec: 300
+    prerequisite_task: T09
+    prerequisite_command: "去高压配电区看一下"
+
+  - id: T12
+    type: 低电量返航
+    command: "返回充电"
+    expected_targets: ["充电口"]
+    order_required: false
+    require_photo: false
+    require_charge: true
+    min_charge_completions: 1
+    min_task_completions: 1
+    init_battery: 100
+    timeout_sec: 300
+
+  - id: T13
+    type: 低电量返航
+    command: "依次检查低压配电室 1、2、3 后返回充电"
+    expected_targets: ["低压配电室1", "低压配电室2", "低压配电室3", "充电口"]
+    order_required: true
+    require_photo: false
+    require_charge: true
+    min_charge_completions: 2
+    min_task_completions: 2
+    init_battery: 20
+    timeout_sec: 600
+
+  - id: T14
+    type: 低电量返航
+    command: "完整巡检一遍，最后去充电"
+    expected_targets: []
+    order_required: false
+    require_photo: false
+    require_charge: true
+    min_charge_completions: 2
+    min_task_completions: 2
+    init_battery: 25
+    timeout_sec: 900
+    notes: "长任务低电，期望目标含充电口；全站覆盖由人工核对"

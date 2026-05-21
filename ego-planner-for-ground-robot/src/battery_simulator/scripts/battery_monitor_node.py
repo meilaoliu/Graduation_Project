@@ -216,12 +216,18 @@ class BatteryMonitor:
         return TriggerResponse(success=True, message="charging started")
 
     def handle_reset(self, _req):
+        pct = float(rospy.get_param("~reset_to_percentage", 100.0))
+        pct = max(0.0, min(100.0, pct))
         with self.lock:
-            self.pct = 100.0
+            self.pct = pct
             self.charging = False
             self.alert_sent = False
-        rospy.loginfo("[battery] reset to 100%%")
-        return TriggerResponse(success=True, message="battery reset to 100%")
+        try:
+            rospy.delete_param("~reset_to_percentage")
+        except Exception:
+            pass
+        rospy.loginfo("[battery] reset to %.1f%%", pct)
+        return TriggerResponse(success=True, message=f"battery reset to {pct:.1f}%")
 
 
 def main():
