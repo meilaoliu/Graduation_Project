@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 第六章端到端实验：一键连续跑完全部 14 条任务（无需分批、无需手动改电量）
+# 第六章端到端实验：一键连续跑完全部 30 条任务（无需分批、无需手动改电量）
 #
 # 用法：
 #   ./run_chapter6_experiments.sh                 # 需已 roslaunch inspection_full

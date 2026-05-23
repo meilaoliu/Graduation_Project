@@ -487,10 +487,10 @@ class SubstationNlpCommanderV2:
         return flags, photo_flags
 
     def _default_inspection_targets(self) -> list:
-        """默认巡检目标：排除入口点和插值点。"""
+        """默认全站巡检目标，与 PathPlanner 的完整巡检顺序保持一致。"""
         return [
-            name for name in self.path_planner.graph.locations
-            if name != "入口点" and not name.startswith("插值点")
+            name for name in self.path_planner.full_inspection_tour
+            if name in self.path_planner.graph.locations
         ]
 
     def _resolve_repeat_count(self, execution_options: dict, planned_path: list, stop_sequence: list) -> int:
@@ -547,6 +547,9 @@ class SubstationNlpCommanderV2:
                 return {"type": "full_inspection", "targets": waypoint_sequence}
 
             expanded_targets = self._expand_and_validate_targets(waypoint_sequence)
+            if normalized_task_type == "single_target" and len(expanded_targets) > 1:
+                rospy.logwarn("LLM 将多目标列表标成 single_target，已改按 custom_path 执行: %s", expanded_targets)
+                return {"type": "custom_path", "targets": expanded_targets}
             return {"type": normalized_task_type, "targets": expanded_targets}
         
         # 单目标判断
@@ -761,7 +764,7 @@ class SubstationNlpCommanderV2:
         print("  🎯 单点导航: '前往低压配电室1' / '去35kV配电箱2'")
         print("  🔍 区域巡检: '检查SVG无功补偿区' / '巡检变压器区域'")
         print("  📋 完整巡检: '完整巡检一遍' / '全面检查设备'")
-        print("  🛠️ 任务控制: 'stop' (停止) / 'pause' (暂停) / 'resume' (恢复)")
+        print("  🛠️ 任务控制: 'stop' (停止)")
         print("  📊 状态查询: 'status' (状态) / 'help' (帮助)")
         print("  🗺️ 图论工具: 'graph' (显示图结构)")
         print("=" * 70)
@@ -853,16 +856,18 @@ class SubstationNlpCommanderV2:
             self._say(f"📥 [chat] {command}")
 
         low = command.lower().strip()
-        # 中英文同义词映射 (子串匹配，让 "停止巡检"/"暂停一下" 也能命中)
-        STOP_KWS    = ('stop', '停止', '停下', '停车', '中止', '取消任务')
-        PAUSE_KWS   = ('pause', '暂停')
-        RESUME_KWS  = ('resume', '继续', '恢复')
+        normalized = "".join(low.split())
+        # 控制类命令只接受短指令，避免把“之后继续巡检...”这类复合任务误判成控制命令。
+        STOP_KWS    = {'stop', '停止', '停下', '停车', '中止', '取消任务', '停止任务', '停止巡检', '停止当前任务'}
         HELP_KWS    = ('help', '帮助', '?', '？')
         STATUS_KWS  = ('status', '状态', '当前状态')
         GRAPH_KWS   = ('graph', '地图', '查看地图')
 
         def _hit(kws):
             return any(k in low for k in kws)
+
+        def _hit_exact(kws):
+            return normalized in kws
 
         if _hit(HELP_KWS):
             self.show_help()
@@ -875,22 +880,13 @@ class SubstationNlpCommanderV2:
         if _hit(GRAPH_KWS):
             self.show_graph_info()
             return
-        if _hit(STOP_KWS):
+        if _hit_exact(STOP_KWS):
             if self.segment_scheduler is not None and self.segment_scheduler.is_active():
                 result = self.segment_scheduler.stop_task()
             else:
                 result = self.waypoint_manager.stop_current_task()
             self._say(f"📋 {result}")
             return
-        if _hit(PAUSE_KWS):
-            result = self.waypoint_manager.pause_current_task()
-            self._say(f"📋 {result}")
-            return
-        if _hit(RESUME_KWS):
-            result = self.waypoint_manager.resume_current_task()
-            self._say(f"📋 {result}")
-            return
-
         self._say("🔄 正在分析指令并规划路径...")
         try:
             response = self.process_command_with_llm(command)

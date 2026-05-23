@@ -111,9 +111,6 @@ class TaskAgentRuntime:
     def should_handle_event(self, event: Dict[str, Any]) -> bool:
         if not self.enabled:
             return False
-        data = event.get("data") or {}
-        if event.get("event_type") == "progress_anomaly" and data.get("kind") == "return_charge":
-            return False
         return str(event.get("event_type", "")) in self.trigger_events
 
     def observe_event(self, event: Dict[str, Any]) -> None:

@@ -25,12 +25,14 @@ class PathPlanner:
             "35kv": ["35kv配电箱1", "35kv配电箱2", "35kv配电箱3"],
         }
         
-        # 完整巡检路径
+        # 完整巡检只保存真实设备目标；入口点和插值点由 Dijkstra 在相邻目标间补全。
+        # 若把入口/插值点写入巡检循环，中途开始时会产生“插值点1→入口点→插值点1”的折返。
         self.full_inspection_tour = [
-            "入口点", "插值点1", "低压配电室1", "低压配电室2", "低压配电室3",
-            "高压配电区巡检点1", "高压配电区巡检点2", "高压配电区巡检点3",
+            "低压配电室1", "低压配电室2", "低压配电室3",
+            "高压配电区巡检点1", "变压器区1", "变压器区2",
+            "高压配电区巡检点2", "高压配电区巡检点3", "变压器区3",
             "3SVG无功补偿区", "2SVG无功补偿区", "1SVG无功补偿区",
-            "35kv配电箱1", "35kv配电箱2", "35kv配电箱3", "插值点1", "入口点"
+            "35kv配电箱1", "35kv配电箱2", "35kv配电箱3"
         ]
     
     def find_matching_waypoint(self, requested_name: str) -> Union[str, List[str], None]:
@@ -546,46 +548,32 @@ class PathPlanner:
         Returns:
             完整巡检路径
         """
-        # 找到当前位置在完整巡检路径中的最佳插入点
-        if current_pos in self.full_inspection_tour:
-            # 如果当前位置在路径中，从当前位置开始
-            start_index = self.full_inspection_tour.index(current_pos)
-            reordered_tour = (self.full_inspection_tour[start_index:] + 
-                            self.full_inspection_tour[1:start_index + 1])
-            return reordered_tour
-        else:
-            # 如果当前位置不在路径中，找最近的点开始
-            nearest_point = self._find_nearest_tour_point(current_pos)
-            if nearest_point:
-                path_to_nearest = self.plan_path_to_single_target(current_pos, nearest_point)
-                start_index = self.full_inspection_tour.index(nearest_point)
-                tour_path = (self.full_inspection_tour[start_index:] + 
-                           self.full_inspection_tour[1:start_index + 1])
-                
-                # 合并路径
-                if path_to_nearest and len(path_to_nearest) > 1:
-                    return path_to_nearest[:-1] + tour_path
-                else:
-                    return tour_path
-            else:
-                return self.full_inspection_tour
+        tour_targets = self._deduplicate_valid_targets(self.full_inspection_tour)
+        if not tour_targets:
+            return []
+
+        if current_pos not in self.graph.locations:
+            return tour_targets
+
+        start_target = current_pos if current_pos in tour_targets else self._find_nearest_tour_point(current_pos)
+        if not start_target:
+            return self.plan_ordered_targets_path(current_pos, tour_targets, deduplicate=False)
+
+        ordered_targets = self._rotate_targets_from(start_target, tour_targets)
+        return self.plan_ordered_targets_path(current_pos, ordered_targets, deduplicate=False)
+
+    def _rotate_targets_from(self, start_target: str, targets: List[str]) -> List[str]:
+        """从指定目标开始访问一轮，不在末尾回到起点。"""
+        if start_target not in targets:
+            return targets[:]
+        start_index = targets.index(start_target)
+        return targets[start_index:] + targets[:start_index]
     
     def _find_nearest_tour_point(self, current_pos: str) -> Optional[str]:
-        """找到完整巡检路径中离当前位置最近的点"""
+        """找到完整巡检目标中拓扑距离当前位置最近的点。"""
         if current_pos not in self.graph.locations:
-            return self.full_inspection_tour[0]  # 默认返回入口点
-        
-        min_distance = float('inf')
-        nearest_point = None
-        
-        for point in self.full_inspection_tour:
-            if point in self.graph.locations:
-                distance = self.graph.euclidean_distance(current_pos, point)
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_point = point
-        
-        return nearest_point
+            return self.full_inspection_tour[0] if self.full_inspection_tour else None
+        return self._find_closest_target(current_pos, self.full_inspection_tour)
     
     def validate_path(self, path: List[str]) -> bool:
         """验证路径是否有效（所有相邻点都有连接）"""

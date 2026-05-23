@@ -10,7 +10,7 @@
 
 单条/分类调试：
   python3 chapter6_task_runner.py --task-id T01
-  python3 chapter6_task_runner.py --type 低电量返航
+  python3 chapter6_task_runner.py --type 长任务与返航恢复
 """
 
 from __future__ import annotations
@@ -52,6 +52,9 @@ SUCCESS_RE = re.compile(r"全部段执行完毕|任务完成")
 CHARGE_RE = re.compile(r"开始充电|充电完成|返航")
 LOW_BATT_RE = re.compile(r"低电量触发返航")
 PHOTO_RE = re.compile(r"已在\s*(.+?)\s*拍照")
+PROGRESS_ANOMALY_RE = re.compile(r"检测到 .*执行进度异常")
+AGENT_DECISION_RE = re.compile(r"🧠 Agent 决策:")
+HALT_RE = re.compile(r"已先发布原地停止路径|已硬停并上报 Agent|原地停止路径")
 
 
 def _norm_name(name: str) -> str:
@@ -83,11 +86,17 @@ def is_terminal_failure(text: str) -> bool:
     return bool(FAIL_RE.search(text))
 
 
-def targets_match(actual: Sequence[str], expected: Sequence[str], order_required: bool) -> Optional[bool]:
+def targets_match(
+    actual: Sequence[str],
+    expected: Sequence[str],
+    order_required: bool,
+    auxiliary_targets: Sequence[str] = (),
+) -> Optional[bool]:
     if not expected:
         return None
-    act = [_norm_name(x) for x in actual]
     exp = [_norm_name(x) for x in expected]
+    aux = {_norm_name(x) for x in auxiliary_targets} - set(exp)
+    act = [_norm_name(x) for x in actual if _norm_name(x) not in aux]
     if not act:
         return False
     if order_required:
@@ -109,6 +118,10 @@ class RunRecord:
     photo_ok: Optional[bool]
     charge_ok: Optional[bool]
     low_battery_seen: bool
+    agent_intervened: bool
+    agent_intervention_count: int
+    progress_anomaly_count: int
+    halt_on_anomaly: bool
     failure_reason: str
     duration_sec: float
     init_battery: float
@@ -170,6 +183,10 @@ class Chapter6TaskRunner:
         self.task_failed = False
         self.failure_reason = ""
         self.actual_targets: List[str] = []
+        self.agent_intervened = False
+        self.agent_intervention_count = 0
+        self.progress_anomaly_count = 0
+        self.halt_on_anomaly = False
 
     def reset_run_state(self):
         self.chat_messages.clear()
@@ -186,6 +203,10 @@ class Chapter6TaskRunner:
         self.task_failed = False
         self.failure_reason = ""
         self.actual_targets = []
+        self.agent_intervened = False
+        self.agent_intervention_count = 0
+        self.progress_anomaly_count = 0
+        self.halt_on_anomaly = False
 
     def _append_targets(self, targets: Sequence[str]):
         existing = {_norm_name(t) for t in self.actual_targets}
@@ -213,6 +234,13 @@ class Chapter6TaskRunner:
                 self.photos.append(m.group(1).strip())
         if LOW_BATT_RE.search(text):
             self.low_battery = True
+        if PROGRESS_ANOMALY_RE.search(text):
+            self.progress_anomaly_count += 1
+        if AGENT_DECISION_RE.search(text):
+            self.agent_intervention_count += 1
+            self.agent_intervened = True
+        if HALT_RE.search(text):
+            self.halt_on_anomaly = True
         if "开始充电" in text:
             self.charge_started = True
             self.charge_started_count += 1
@@ -300,6 +328,10 @@ class Chapter6TaskRunner:
                 photo_ok=None,
                 charge_ok=None,
                 low_battery_seen=False,
+                agent_intervened=False,
+                agent_intervention_count=0,
+                progress_anomaly_count=0,
+                halt_on_anomaly=False,
                 failure_reason="dry-run",
                 duration_sec=0.0,
                 init_battery=init_battery,
@@ -340,7 +372,8 @@ class Chapter6TaskRunner:
             rate.sleep()
 
         duration = time.time() - t0
-        parse_ok = targets_match(self.actual_targets, expected, order_required)
+        auxiliary_targets = ["充电口"] if require_charge else []
+        parse_ok = targets_match(self.actual_targets, expected, order_required, auxiliary_targets)
         segment_ok = not self.task_failed or self.segments_done > 0
         if self.task_failed and self.segments_done == 0:
             segment_ok = False
@@ -375,6 +408,10 @@ class Chapter6TaskRunner:
             photo_ok=photo_ok,
             charge_ok=charge_ok,
             low_battery_seen=self.low_battery,
+            agent_intervened=self.agent_intervened,
+            agent_intervention_count=self.agent_intervention_count,
+            progress_anomaly_count=self.progress_anomaly_count,
+            halt_on_anomaly=self.halt_on_anomaly,
             failure_reason=self.failure_reason,
             duration_sec=duration,
             init_battery=init_battery,
@@ -389,6 +426,8 @@ def save_csv(records: List[RunRecord], path: Path, *, fresh: bool = False):
         "expected_targets", "actual_targets",
         "parse_ok", "task_done", "segment_ok",
         "photo_ok", "charge_ok", "low_battery_seen",
+        "agent_intervened", "agent_intervention_count",
+        "progress_anomaly_count", "halt_on_anomaly",
         "failure_reason", "duration_sec", "init_battery",
     ]
     write_header = fresh or not path.exists()
@@ -425,6 +464,14 @@ def aggregate_by_type(records: List[RunRecord]) -> Dict[str, Dict[str, Any]]:
         done_vals = [r.task_done for r in rows]
         seg_vals = [r.segment_ok for r in rows]
         event_vals = []
+        agent_vals = [r.agent_intervened for r in rows]
+        anomaly_vals = [r.progress_anomaly_count > 0 for r in rows]
+        agent_task_total = sum(1 for r in rows if r.agent_intervened)
+        agent_done_total = sum(1 for r in rows if r.agent_intervened and r.task_done)
+        anomaly_task_total = sum(1 for r in rows if r.progress_anomaly_count > 0)
+        anomaly_halt_total = sum(1 for r in rows if r.progress_anomaly_count > 0 and r.halt_on_anomaly)
+        agent_intervention_total = sum(r.agent_intervention_count for r in rows)
+        anomaly_total = sum(r.progress_anomaly_count for r in rows)
         for r in rows:
             ok = True
             if r.photo_ok is False or r.charge_ok is False:
@@ -440,39 +487,69 @@ def aggregate_by_type(records: List[RunRecord]) -> Dict[str, Dict[str, Any]]:
             "tcr": pct(done_vals),
             "snsr": pct(seg_vals),
             "event": pct(event_vals),
+            "ipa_ok_total": sum(1 for v in parse_vals if v),
+            "ipa_eval_total": len(parse_vals),
+            "tcr_ok_total": sum(1 for v in done_vals if v),
+            "snsr_ok_total": sum(1 for v in seg_vals if v),
+            "event_ok_total": sum(1 for v in event_vals if v),
+            "air": pct(agent_vals),
+            "airr": 100.0 * agent_done_total / agent_task_total if agent_task_total else 0.0,
+            "par": pct(anomaly_vals),
+            "har": 100.0 * anomaly_halt_total / anomaly_task_total if anomaly_task_total else 0.0,
+            "anomaly_intervention_rate": 100.0 * agent_intervention_total / anomaly_total if anomaly_total else 0.0,
+            "agent_intervention_total": agent_intervention_total,
+            "progress_anomaly_total": anomaly_total,
+            "agent_task_total": agent_task_total,
+            "agent_done_total": agent_done_total,
+            "anomaly_task_total": anomaly_task_total,
+            "anomaly_halt_total": anomaly_halt_total,
         }
     return summary
 
 
+def overall_rates(summary: Dict[str, Dict[str, Any]], order: Sequence[str]) -> Dict[str, float]:
+    selected = [summary[t] for t in order if t in summary]
+    total_tasks = sum(s["count"] for s in selected)
+    ipa_den = sum(s.get("ipa_eval_total", 0) for s in selected)
+
+    def pct(ok: int, den: int) -> float:
+        return 100.0 * ok / den if den else 0.0
+
+    return {
+        "count": total_tasks,
+        "ipa": pct(sum(s.get("ipa_ok_total", 0) for s in selected), ipa_den),
+        "tcr": pct(sum(s.get("tcr_ok_total", 0) for s in selected), total_tasks),
+        "snsr": pct(sum(s.get("snsr_ok_total", 0) for s in selected), total_tasks),
+        "event": pct(sum(s.get("event_ok_total", 0) for s in selected), total_tasks),
+    }
+
+
 def print_summary_table(summary: Dict[str, Dict[str, Any]]):
-    order = ["单目标巡检", "多目标巡检", "区域模糊巡检", "上下文相关指令", "低电量返航"]
+    order = ["单目标巡检", "多目标巡检", "区域与时间约束巡检", "多轮对话", "长任务与返航恢复"]
     print("\n" + "=" * 72)
     print("  Chapter 6 experiment summary")
     print("=" * 72)
     print(f"{'类型':<14} {'N':>4} {'IPA':>8} {'TCR':>8} {'SNSR':>8} {'事件':>8}")
     print("-" * 72)
-    totals = defaultdict(list)
     for ttype in order:
         if ttype not in summary:
             continue
         s = summary[ttype]
         print(f"{ttype:<14} {s['count']:>4} {s['ipa']:>7.1f}% {s['tcr']:>7.1f}% "
               f"{s['snsr']:>7.1f}% {s['event']:>7.1f}%")
-        for k in ("ipa", "tcr", "snsr", "event"):
-            totals[k].extend([s[k]] * s["count"])
-    if totals["ipa"]:
-        n_all = sum(summary[t]["count"] for t in order if t in summary)
+    overall = overall_rates(summary, order)
+    if overall["count"]:
         print("-" * 72)
-        print(f"{'合计':<14} {n_all:>4} "
-              f"{sum(totals['ipa'])/len(totals['ipa']):>7.1f}% "
-              f"{sum(totals['tcr'])/len(totals['tcr']):>7.1f}% "
-              f"{sum(totals['snsr'])/len(totals['snsr']):>7.1f}% "
-              f"{sum(totals['event'])/len(totals['event']):>7.1f}%")
+        print(f"{'合计':<14} {overall['count']:>4} "
+              f"{overall['ipa']:>7.1f}% "
+              f"{overall['tcr']:>7.1f}% "
+              f"{overall['snsr']:>7.1f}% "
+              f"{overall['event']:>7.1f}%")
     print("=" * 72)
 
 
 def latex_table_rows(summary: Dict[str, Dict[str, Any]]) -> str:
-    order = ["单目标巡检", "多目标巡检", "区域模糊巡检", "上下文相关指令", "低电量返航"]
+    order = ["单目标巡检", "多目标巡检", "区域与时间约束巡检", "多轮对话", "长任务与返航恢复"]
     lines = []
     for ttype in order:
         if ttype not in summary:
@@ -483,13 +560,10 @@ def latex_table_rows(summary: Dict[str, Dict[str, Any]]) -> str:
             f"{s['snsr']:.1f} & {s['event']:.1f} \\\\"
         )
     if lines:
-        n_all = sum(summary[t]["count"] for t in order if t in summary)
-        ipa = sum(summary[t]["ipa"] * summary[t]["count"] for t in order if t in summary) / max(n_all, 1)
-        tcr = sum(summary[t]["tcr"] * summary[t]["count"] for t in order if t in summary) / max(n_all, 1)
-        snsr = sum(summary[t]["snsr"] * summary[t]["count"] for t in order if t in summary) / max(n_all, 1)
-        ev = sum(summary[t]["event"] * summary[t]["count"] for t in order if t in summary) / max(n_all, 1)
+        overall = overall_rates(summary, order)
         lines.append(
-            f"        合计 & {n_all} & {ipa:.1f} & {tcr:.1f} & {snsr:.1f} & {ev:.1f} \\\\"
+            f"        合计 & {int(overall['count'])} & {overall['ipa']:.1f} & "
+            f"{overall['tcr']:.1f} & {overall['snsr']:.1f} & {overall['event']:.1f} \\\\"
         )
     return "\n".join(lines)
 
@@ -505,7 +579,7 @@ def append_obsidian_summary(summary: Dict[str, Dict[str, Any]], obsidian_path: P
         "| 任务类型 | 任务数 | IPA (%) | TCR (%) | SNSR (%) | 事件正确率 (%) |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    order = ["单目标巡检", "多目标巡检", "区域模糊巡检", "上下文相关指令", "低电量返航"]
+    order = ["单目标巡检", "多目标巡检", "区域与时间约束巡检", "多轮对话", "长任务与返航恢复"]
     for ttype in order:
         if ttype not in summary:
             continue
@@ -514,7 +588,12 @@ def append_obsidian_summary(summary: Dict[str, Dict[str, Any]], obsidian_path: P
             f"| {ttype} | {s['count']} | {s['ipa']:.1f} | {s['tcr']:.1f} | "
             f"{s['snsr']:.1f} | {s['event']:.1f} |"
         )
-    block.append("")
+    overall = overall_rates(summary, order)
+    if overall["count"]:
+        block.append(
+            f"| 合计 | {int(overall['count'])} | {overall['ipa']:.1f} | "
+            f"{overall['tcr']:.1f} | {overall['snsr']:.1f} | {overall['event']:.1f} |"
+        )
     block.append("```latex")
     block.append("% tab:ch6_results_summary")
     block.append(latex_table_rows(summary))

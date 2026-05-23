@@ -38,15 +38,7 @@ class WaypointManager:
     def stop_current_task(self) -> str:
         """兼容旧调用；实际任务停止由 SegmentScheduler 负责。"""
         return "✅ 当前没有活跃任务"
-    
-    def pause_current_task(self) -> str:
-        """分段全局轨迹模式暂不支持暂停。"""
-        return "❌ 分段全局轨迹模式暂不支持暂停，请使用停止任务"
-    
-    def resume_current_task(self) -> str:
-        """分段全局轨迹模式暂不支持恢复。"""
-        return "❌ 分段全局轨迹模式暂不支持恢复，请重新下达任务"
-    
+
     def get_current_status(self) -> dict:
         """获取当前状态信息"""
         current_info = "未知位置"

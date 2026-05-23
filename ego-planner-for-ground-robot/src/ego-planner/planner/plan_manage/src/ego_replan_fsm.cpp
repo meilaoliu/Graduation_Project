@@ -1,5 +1,6 @@
 
 #include <plan_manage/ego_replan_fsm.h>
+#include <plan_manage/fsm_heading_utils.h>
 #include <plan_manage/ground_safety_utils.h>
 #include <cmath>
 
@@ -288,7 +289,21 @@ namespace ego_planner
     have_new_target_ = true;
     trigger_ = true;
     has_active_segment_ = true;
-    segment_forward_local_target_ = true;
+    pending_segment_yaw_align_ = false;
+    if (forward_only_)
+    {
+      double segment_yaw = 0.0;
+      if (firstDistinctWaypointYaw2d(wps, odom_pos_, 0.30, &segment_yaw))
+      {
+        pending_segment_yaw_ = segment_yaw;
+        pending_segment_yaw_align_ = needsYawAlignment(segment_yaw, yaw, yaw_error_max);
+        if (pending_segment_yaw_align_)
+        {
+          ROS_WARN("[FSM][segment %u] start heading offset %.1f deg, align before planning.",
+                   current_segment_id_, std::fabs(normalizeYawError(segment_yaw, yaw)) * 180.0 / PI);
+        }
+      }
+    }
 
     ROS_INFO("[FSM][segment %u] accepted, %zu waypoints, duration=%.2fs.",
              current_segment_id_, wps.size(), planner_manager_->global_data_.global_duration_);
@@ -720,6 +735,29 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
       }
 
       start_pt_ = odom_pos_;
+      if (pending_segment_yaw_align_ && forward_only_)
+      {
+        yaw_start = pending_segment_yaw_;
+        yaw_error = shortestYawError(yaw_start, yaw);
+        pending_segment_yaw_align_ = false;
+
+        if (std::fabs(yaw_error) > yaw_error_max)
+        {
+          ROS_WARN("[FSM forward_only] Align segment start: yaw=%.1f, segment=%.1f, error=%.1f deg",
+                   yaw * 180.0 / PI, yaw_start * 180.0 / PI, yaw_error * 180.0 / PI);
+          adjust_pose_latched_ = false;
+          adjust_settle_count_ = 0;
+          cmd_vel.linear.x = 0;
+          cmd_vel.angular.z = yaw_error / std::fabs(yaw_error) * w_adjust;
+          is_adjust_pose.data = 1;
+          adjust_cmd_pub_.publish(is_adjust_pose);
+          cmd_pub_.publish(cmd_vel);
+          changeFSMExecState(ADJUST_POSE, "SEG_ALIGN");
+          last_state_ = GEN_NEW_TRAJ;
+          is_target_receive = false;
+          break;
+        }
+      }
       if (planner_manager_->grid_map_)
       {
         Eigen::Vector2d start_pt_2d(start_pt_(0), start_pt_(1));
@@ -857,7 +895,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
           cout<<"yaw error : "<<yaw_error<<endl;
         info->start_time_ = ros::Time::now();
         publishBspline();
-        segment_forward_local_target_ = false;
         changeFSMExecState(EXEC_TRAJ, "FSM");
         flag_escape_emergency_ = true;
       }
@@ -1653,57 +1690,6 @@ void EGOReplanFSM::goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg
     }
 
     local_target_pt_(2) = odom_pos_(2);
-
-    // 段初局部目标若落在车头后方，沿全局轨迹向前搜索第一个前方 horizon 点
-    if (segment_forward_local_target_ && forward_only_)
-    {
-      Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block<3, 1>(0, 0);
-      const double odom_yaw = atan2(rot_x(1), rot_x(0));
-      const Eigen::Vector2d fwd(std::cos(odom_yaw), std::sin(odom_yaw));
-      const Eigen::Vector2d to_lc = (local_target_pt_ - start_pt_).head<2>();
-      const double old_lc_yaw =
-          to_lc.norm() > 0.05 ? atan2(to_lc(1), to_lc(0)) : odom_yaw;
-
-      if (to_lc.norm() > 0.05 && to_lc.normalized().dot(fwd) < 0.0)
-      {
-        const double min_dist = planning_horizen_ * 0.5;
-        bool found = false;
-        for (double t2 = planner_manager_->global_data_.last_progress_time_;
-             t2 < planner_manager_->global_data_.global_duration_; t2 += t_step)
-        {
-          Eigen::Vector3d pos_t2 = planner_manager_->global_data_.getPosition(t2);
-          const Eigen::Vector2d delta = (pos_t2 - start_pt_).head<2>();
-          if (delta.norm() < 0.05)
-            continue;
-          if (delta.normalized().dot(fwd) > 0.0 && delta.norm() >= min_dist)
-          {
-            local_target_pt_ = pos_t2;
-            local_target_pt_(2) = odom_pos_(2);
-            planner_manager_->global_data_.glb_t_of_lc_tgt_ = t2;
-            const double new_lc_yaw = atan2(delta(1), delta(0));
-            ROS_INFO(
-                "[getLocalTarget] seg#%u forward pick: odom=%.1f old_lc=%.1f new_lc=%.1f t=%.2f dist=%.2fm",
-                current_segment_id_, odom_yaw * 180.0 / PI, old_lc_yaw * 180.0 / PI,
-                new_lc_yaw * 180.0 / PI, t2, delta.norm());
-            found = true;
-            break;
-          }
-        }
-        if (!found)
-        {
-          ROS_WARN("[getLocalTarget] seg#%u no forward local target on global (old_lc=%.1f deg)",
-                   current_segment_id_, old_lc_yaw * 180.0 / PI);
-        }
-      }
-      else
-      {
-        ROS_INFO_THROTTLE(
-            1.0,
-            "[getLocalTarget] seg#%u lc_yaw=%.1f odom_yaw=%.1f err=%.1f deg (no behind fix)",
-            current_segment_id_, old_lc_yaw * 180.0 / PI, odom_yaw * 180.0 / PI,
-            shortestYawError(old_lc_yaw, odom_yaw) * 180.0 / PI);
-      }
-    }
 
     // (Fix A 已回退: 经验证沿全局轨迹回溯/侧向扫描在 substation 高密度场景中
     //  收益甚微 [0/30], 且会让 last_failure_reason_ 标签更乱。

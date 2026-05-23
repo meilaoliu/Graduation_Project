@@ -118,8 +118,9 @@ namespace ego_planner
     // 分段巡检：当前正在执行的段编号；轨迹自然结束时会在 /segment_done 上发布，供上层 nlp_commander 调度下一段
     uint32_t current_segment_id_{0};
     bool has_active_segment_{false};
-    // 新 segment 接入后，getLocalTarget 仅选车头前方的 horizon 点（直至首次 EXEC）
-    bool segment_forward_local_target_{false};
+    // forward_only 新段若起始方向在车后方，先原地对齐再规划，避免局部目标被选到错误方向。
+    bool pending_segment_yaw_align_{false};
+    double pending_segment_yaw_{0.0};
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
