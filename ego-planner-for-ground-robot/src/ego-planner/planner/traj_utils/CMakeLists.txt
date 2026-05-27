@@ -42,3 +42,10 @@ add_library( traj_utils
 target_link_libraries( traj_utils
     ${catkin_LIBRARIES} 
     )  
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_planning_visualization test/test_planning_visualization.cpp)
+  if(TARGET test_planning_visualization)
+    target_link_libraries(test_planning_visualization traj_utils ${catkin_LIBRARIES})
+  endif()
+endif()

@@ -599,6 +599,10 @@ namespace ego_planner
 
         auto time_now = ros::Time::now();
         global_data_.setGlobalTraj(gl_traj, time_now);
+        if (visualization_)
+        {
+            visualization_->displayGlobalWaypointList(inter_points, 0.25, 0);
+        }
 
         return true;
     }

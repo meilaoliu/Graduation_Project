@@ -7,6 +7,7 @@
 #include <iostream>
 #include <traj_utils/polynomial_traj.h>
 #include <ros/ros.h>
+#include <string>
 #include <vector>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
@@ -23,10 +24,9 @@ namespace ego_planner
   class PlanningVisualization
   {
   private:
-    ros::NodeHandle node;
-
     ros::Publisher goal_point_pub;
     ros::Publisher global_list_pub;
+    ros::Publisher global_waypoint_list_pub;
     ros::Publisher init_list_pub;
     ros::Publisher optimal_list_pub;
     ros::Publisher a_star_list_pub;
@@ -44,10 +44,14 @@ namespace ego_planner
                            Eigen::Vector4d color, int id, bool show_sphere = true);
     void generatePathDisplayArray(visualization_msgs::MarkerArray &array,
                                   const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id);
+    void generatePointDisplayArray(visualization_msgs::MarkerArray &array,
+                                   const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id,
+                                   const std::string &marker_ns);
     void generateArrowDisplayArray(visualization_msgs::MarkerArray &array,
                                    const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id);
     void displayGoalPoint(Eigen::Vector3d goal_point, Eigen::Vector4d color, const double scale, int id);
     void displayGlobalPathList(vector<Eigen::Vector3d> global_pts, const double scale, int id);
+    void displayGlobalWaypointList(const vector<Eigen::Vector3d> &waypoint_pts, const double scale, int id);
     void displayInitPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id);
     void displayOptimalList(Eigen::MatrixXd optimal_pts, int id);
     void displayMincoTraj(const poly_traj::Trajectory &traj, double sample_dt, int id);

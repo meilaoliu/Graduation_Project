@@ -9,10 +9,9 @@ namespace ego_planner
 {
   PlanningVisualization::PlanningVisualization(ros::NodeHandle &nh)
   {
-    node = nh;
-
     goal_point_pub = nh.advertise<visualization_msgs::Marker>("goal_point", 2);
     global_list_pub = nh.advertise<visualization_msgs::Marker>("global_list", 2);
+    global_waypoint_list_pub = nh.advertise<visualization_msgs::Marker>("global_waypoint_list", 2);
     init_list_pub = nh.advertise<visualization_msgs::Marker>("init_list", 2);
     optimal_list_pub = nh.advertise<visualization_msgs::Marker>("optimal_list", 2);
     a_star_list_pub = nh.advertise<visualization_msgs::Marker>("a_star_list", 20);
@@ -86,6 +85,39 @@ namespace ego_planner
     }
     array.markers.push_back(sphere);
     array.markers.push_back(line_strip);
+  }
+
+  void PlanningVisualization::generatePointDisplayArray(visualization_msgs::MarkerArray &array,
+                                                        const vector<Eigen::Vector3d> &list, double scale, Eigen::Vector4d color, int id,
+                                                        const std::string &marker_ns)
+  {
+    visualization_msgs::Marker sphere;
+    sphere.header.frame_id = "map";
+    sphere.header.stamp = ros::isInitialized() ? ros::Time::now() : ros::Time(0);
+    sphere.ns = marker_ns;
+    sphere.type = visualization_msgs::Marker::SPHERE_LIST;
+    sphere.action = visualization_msgs::Marker::ADD;
+    sphere.id = id;
+
+    sphere.pose.orientation.w = 1.0;
+    sphere.color.r = color(0);
+    sphere.color.g = color(1);
+    sphere.color.b = color(2);
+    sphere.color.a = color(3) > 1e-5 ? color(3) : 1.0;
+    sphere.scale.x = scale;
+    sphere.scale.y = scale;
+    sphere.scale.z = scale;
+
+    geometry_msgs::Point pt;
+    for (int i = 0; i < int(list.size()); i++)
+    {
+      pt.x = list[i](0);
+      pt.y = list[i](1);
+      pt.z = list[i](2);
+      sphere.points.push_back(pt);
+    }
+
+    array.markers.push_back(sphere);
   }
 
   // real ids used: {1000*id ~ (arrow nums)+1000*id}
@@ -179,6 +211,29 @@ namespace ego_planner
 
     Eigen::Vector4d color(0, 0.5, 0.5, 1);
     displayMarkerList(global_list_pub, global_path, scale, color, id);
+  }
+
+  void PlanningVisualization::displayGlobalWaypointList(const vector<Eigen::Vector3d> &waypoint_pts, const double scale, int id)
+  {
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = "map";
+    marker.header.stamp = ros::Time::now();
+    marker.ns = "global_waypoint_list";
+    marker.action = visualization_msgs::Marker::DELETEALL;
+    global_waypoint_list_pub.publish(marker);
+
+    if (waypoint_pts.empty())
+    {
+      return;
+    }
+
+    Eigen::Vector4d color(1.0, 0.55, 0.0, 1.0);
+    visualization_msgs::MarkerArray array;
+    generatePointDisplayArray(array, waypoint_pts, scale, color, id, "global_waypoint_list");
+    for (const auto &point_marker : array.markers)
+    {
+      global_waypoint_list_pub.publish(point_marker);
+    }
   }
 
   void PlanningVisualization::displayInitPathList(vector<Eigen::Vector3d> init_pts, const double scale, int id)

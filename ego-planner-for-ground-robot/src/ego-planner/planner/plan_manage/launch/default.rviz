@@ -88,6 +88,14 @@ Visualization Manager:
           Value: true
         - Class: rviz/Marker
           Enabled: true
+          Marker Topic: /ego_planner_node/global_waypoint_list
+          Name: global_waypoints
+          Namespaces:
+            "": true
+          Queue Size: 100
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
           Marker Topic: /ego_planner_node/optimal_list
           Name: optimal_traj
           Namespaces:
