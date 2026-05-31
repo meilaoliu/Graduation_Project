@@ -105,13 +105,21 @@ catkin build
 source devel/setup.bash
 ```
 
-自然语言功能从环境变量读取 API Key：
+自然语言功能默认使用阿里云 DashScope 的 OpenAI 兼容接口，模型默认配置为通义千问/Qwen：
 
 ```bash
 export DASHSCOPE_API_KEY=...
-# or
-export OPENAI_API_KEY=...
+# Optional defaults used by the code:
+export DASHSCOPE_MODEL=qwen3.6-plus
+export DASHSCOPE_ENABLE_THINKING=false
+export DASHSCOPE_TEMPERATURE=0.1
+export DASHSCOPE_MAX_TOKENS=2048
 ```
+
+默认 `base_url` 为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+代码内部使用 `openai` Python 包只是因为 DashScope 提供 OpenAI-compatible API，并不表示默认走 OpenAI 官方接口。
+`OPENAI_API_KEY` 只作为兼容 fallback 保留；正常运行 OmniInspect 时请设置 `DASHSCOPE_API_KEY`。
+如果要切到其他 OpenAI-compatible 服务，需要同时覆盖 `DASHSCOPE_BASE_URL` 和 `DASHSCOPE_MODEL`。
 
 不要把 API Key 写进仓库或提交到 Git。
 
@@ -516,13 +524,22 @@ catkin build
 source devel/setup.bash
 ```
 
-Set an API key for natural-language features:
+Natural-language features use Alibaba Cloud DashScope's OpenAI-compatible endpoint by default.
+The default model configuration is Qwen:
 
 ```bash
 export DASHSCOPE_API_KEY=...
-# or
-export OPENAI_API_KEY=...
+# Optional defaults used by the code:
+export DASHSCOPE_MODEL=qwen3.6-plus
+export DASHSCOPE_ENABLE_THINKING=false
+export DASHSCOPE_TEMPERATURE=0.1
+export DASHSCOPE_MAX_TOKENS=2048
 ```
+
+The default `base_url` is `https://dashscope.aliyuncs.com/compatible-mode/v1`.
+The project uses the `openai` Python package only as an OpenAI-compatible client for DashScope.
+`OPENAI_API_KEY` is accepted only as a compatibility fallback; for normal OmniInspect usage, set `DASHSCOPE_API_KEY`.
+To use another OpenAI-compatible provider, override both `DASHSCOPE_BASE_URL` and `DASHSCOPE_MODEL`.
 
 Do not commit API keys.
 

@@ -38,10 +38,21 @@ catkin build
 
 ## LLM Keys
 
-Natural-language features read API keys from the environment:
+Natural-language features use Alibaba Cloud DashScope's OpenAI-compatible endpoint by default.
+For normal OmniInspect usage, set a DashScope key:
 
 ```bash
 export DASHSCOPE_API_KEY=...
-# or
-export OPENAI_API_KEY=...
 ```
+
+Default model settings:
+
+```bash
+export DASHSCOPE_MODEL=qwen3.6-plus
+export DASHSCOPE_ENABLE_THINKING=false
+export DASHSCOPE_TEMPERATURE=0.1
+export DASHSCOPE_MAX_TOKENS=2048
+```
+
+The default `DASHSCOPE_BASE_URL` is `https://dashscope.aliyuncs.com/compatible-mode/v1`.
+`OPENAI_API_KEY` is accepted by the code only as a compatibility fallback; if you use another OpenAI-compatible provider, also override `DASHSCOPE_BASE_URL` and `DASHSCOPE_MODEL`.
