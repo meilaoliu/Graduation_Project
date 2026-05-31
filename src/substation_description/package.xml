@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>substation_description</name>
+  <version>0.1.0</version>
+  <description>Gazebo model metadata and release-asset layout for the OmniInspect substation scene.</description>
+
+  <maintainer email="meilaoliu@users.noreply.github.com">meilaoliu</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+</package>

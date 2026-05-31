@@ -1,0 +1,56 @@
+# Catkin build products
+build/
+devel/
+install/
+logs/
+.catkin_tools/
+.catkin_workspace
+
+# Local editor and assistant state
+.vscode/
+.idea/
+.github/skills/
+.claude/
+.codex/
+.agents/
+/CLAUDE.md
+/e.plan.md
+/suggest.md
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime output
+*.log
+*.csv
+cmd_profile.png
+rviz.png
+gazebo.png
+chapter6_log/
+chapter6_log_T07_T10/
+inspection_photos/
+
+# Large local simulation assets.
+# Install the public release asset with scripts/download_substation_assets.sh.
+/substation_dae/
+src/substation_description/models/substation_dae/meshes/*
+src/substation_description/models/substation_dae/materials/textures/*
+!src/substation_description/models/substation_dae/meshes/.gitkeep
+!src/substation_description/models/substation_dae/materials/textures/.gitkeep
+*.dae
+*.blend
+*.blend1
+
+# Local archives and scratch files
+/ego-planner-for-ground-robot/
+*.zip
+*.tar
+*.tar.gz
+*.tar.zst
+*.tgz
+files/
+log/
