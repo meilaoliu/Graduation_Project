@@ -54,3 +54,8 @@ src/substation_description/models/substation_dae/materials/textures/*
 *.tgz
 files/
 log/
+
+.github/
+
+# Ad-hoc local build outputs
+src/nlp_commander/archive/Dijkstra/test
